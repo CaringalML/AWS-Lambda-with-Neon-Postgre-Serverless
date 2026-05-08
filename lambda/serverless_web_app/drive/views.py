@@ -174,20 +174,33 @@ def drive_home(request, folder_pk=None):
 
     q = request.GET.get("q", "").strip()
 
-    files = DriveFile.objects.filter(
-        owner_sub=owner_sub,
-        folder=current_folder,
-        deleted_at__isnull=True,
-    ).filter(
-        # Show instantly-accessible files, or Deep Archive / Glacier files that have been restored
-        Q(storage_class=DriveFile.GLACIER_IR)
-        | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
-    )
-    subfolders = DriveFolder.objects.filter(owner_sub=owner_sub, parent=current_folder, deleted_at__isnull=True)
-
     if q:
-        files = files.filter(name__icontains=q)
-        subfolders = subfolders.filter(name__icontains=q)
+        # Global search — span all folders so users can find any file by name
+        files = DriveFile.objects.filter(
+            owner_sub=owner_sub,
+            deleted_at__isnull=True,
+            name__icontains=q,
+        ).filter(
+            Q(storage_class=DriveFile.GLACIER_IR)
+            | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
+        )
+        subfolders = DriveFolder.objects.filter(
+            owner_sub=owner_sub,
+            deleted_at__isnull=True,
+            name__icontains=q,
+        )
+    else:
+        # Normal folder-scoped listing
+        files = DriveFile.objects.filter(
+            owner_sub=owner_sub,
+            folder=current_folder,
+            deleted_at__isnull=True,
+        ).filter(
+            # Show instantly-accessible files, or Deep Archive / Glacier files that have been restored
+            Q(storage_class=DriveFile.GLACIER_IR)
+            | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
+        )
+        subfolders = DriveFolder.objects.filter(owner_sub=owner_sub, parent=current_folder, deleted_at__isnull=True)
 
     ctx = {
         "files": files,
