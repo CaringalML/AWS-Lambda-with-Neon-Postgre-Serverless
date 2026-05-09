@@ -639,7 +639,8 @@ document.addEventListener('alpine:init', () => {
             </a>
         </div>
 
-        <div class="p-3 space-y-0.5 flex-1 overflow-auto min-h-0">
+        <div class="p-3 flex-1 overflow-auto min-h-0">
+        <div class="min-w-full w-max space-y-0.5">
 
             {# My Drive (root) #}
             <a href="{% url 'drive_home' %}"
@@ -677,6 +678,7 @@ document.addEventListener('alpine:init', () => {
                     {% include "drive/partials/sidebar_folder.html" %}
                 {% endwith %}
             {% endfor %}
+        </div>
         </div>
 
         {# Sidebar stats + selection #}
