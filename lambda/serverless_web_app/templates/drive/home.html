@@ -615,7 +615,7 @@ document.addEventListener('alpine:init', () => {
          class="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"></div>
 
     {# ═══════════════════ SIDEBAR ═══════════════════ #}
-    <aside class="fixed inset-y-0 left-0 z-50 w-72 flex flex-col bg-[#0f1117] border-r border-zinc-800/80 overflow-y-auto
+    <aside class="fixed inset-y-0 left-0 z-50 w-72 flex flex-col bg-[#0f1117] border-r border-zinc-800/80
                   transition-transform duration-300 ease-in-out
                   md:static md:z-auto md:w-64 md:shrink-0 md:transition-none md:translate-x-0"
            :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full md:hidden'">
@@ -631,7 +631,7 @@ document.addEventListener('alpine:init', () => {
             </a>
         </div>
 
-        <div class="p-3 space-y-0.5 flex-1">
+        <div class="p-3 space-y-0.5 flex-1 overflow-y-auto min-h-0">
 
             {# My Drive (root) #}
             <a href="{% url 'drive_home' %}"
