@@ -281,7 +281,16 @@ document.addEventListener('alpine:init', () => {
         },
         closeCtx() { this.ctx.show = false; },
 
+        _previewList: [],
+        _previewIdx: -1,
+
         async openPreview(pk) {
+            const items = document.querySelectorAll('[data-file-pk]');
+            this._previewList = Array.from(items).map(el => parseInt(el.dataset.filePk));
+            this._previewIdx = this._previewList.indexOf(parseInt(pk));
+            await this._loadPreview(pk);
+        },
+        async _loadPreview(pk) {
             this.preview = { loading: true, name: '', url: '', content_type: '', size: '', pk };
             try {
                 const resp = await fetch(`/drive/view/${pk}/url/`, { headers: { 'X-CSRFToken': this.csrf() } });
@@ -292,6 +301,16 @@ document.addEventListener('alpine:init', () => {
                 alert('Could not load preview: ' + err.message);
                 this.preview = null;
             }
+        },
+        prevFile() {
+            if (this._previewList.length <= 1) return;
+            this._previewIdx = (this._previewIdx - 1 + this._previewList.length) % this._previewList.length;
+            this._loadPreview(this._previewList[this._previewIdx]);
+        },
+        nextFile() {
+            if (this._previewList.length <= 1) return;
+            this._previewIdx = (this._previewIdx + 1) % this._previewList.length;
+            this._loadPreview(this._previewList[this._previewIdx]);
         },
         closePreview() { this.preview = null; },
         isImage()  { return this.preview?.content_type?.startsWith('image/'); },
@@ -1233,12 +1252,12 @@ document.addEventListener('alpine:init', () => {
     <div x-show="preview"
          @keydown.window="
              if ($event.key === 'Escape') { closePreview(); return; }
-             if (!isVideo()) return;
-             const v = $el.querySelector('video');
-             if (!v) return;
-             if ($event.key === 'ArrowLeft')  { $event.preventDefault(); v.currentTime = Math.max(0, v.currentTime - 10); }
-             if ($event.key === 'ArrowRight') { $event.preventDefault(); v.currentTime = Math.min(v.duration || 0, v.currentTime + 10); }
-             if ($event.key === ' ' && document.activeElement !== v) { $event.preventDefault(); v.paused ? v.play() : v.pause(); }
+             if ($event.key === 'ArrowLeft')  { $event.preventDefault(); prevFile(); return; }
+             if ($event.key === 'ArrowRight') { $event.preventDefault(); nextFile(); return; }
+             if ($event.key === ' ' && isVideo()) {
+                 const v = $el.querySelector('video');
+                 if (v && document.activeElement !== v) { $event.preventDefault(); v.paused ? v.play() : v.pause(); }
+             }
          "
          class="fixed inset-0 z-50 flex flex-col bg-black/95">
 
@@ -1274,7 +1293,21 @@ document.addEventListener('alpine:init', () => {
         </div>
 
         {# Content area #}
-        <div class="flex-1 overflow-auto flex items-center justify-center bg-slate-950">
+        <div class="flex-1 overflow-auto flex items-center justify-center bg-slate-950 relative">
+
+            {# Prev button #}
+            <button x-show="_previewList.length > 1" @click="prevFile()"
+                    class="absolute left-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 flex items-center justify-center rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors duration-150"
+                    title="Previous (←)">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+            </button>
+
+            {# Next button #}
+            <button x-show="_previewList.length > 1" @click="nextFile()"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 flex items-center justify-center rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors duration-150"
+                    title="Next (→)">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+            </button>
 
             {# Loading spinner #}
             <div x-show="preview?.loading" class="flex flex-col items-center gap-3">
