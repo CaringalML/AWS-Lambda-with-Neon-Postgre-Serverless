@@ -3,8 +3,8 @@
 A Google Drive-like cloud storage app running entirely on AWS Lambda — fully serverless, no EC2, no servers to manage. Push to `novadrive` and it deploys itself.
 
 **Live stack:** Django 5 → Mangum → AWS Lambda → API Gateway v2 → CloudFront → S3  
-**Auth:** AWS Cognito (signup, email verify, signin, forgot/reset password)  
-**UI:** Alpine.js + HTMX + Tailwind CSS (CDN — no build step)  
+**Auth:** Single-admin session auth — credentials stored in Lambda env vars, compared via `hmac.compare_digest`  
+**UI:** Alpine.js + Tailwind CSS (CDN — no build step)  
 **Domain:** `drive.nodepulsecaringal.xyz` (custom domain via ACM + Cloudflare + API Gateway)  
 **Region:** Sydney (`ap-southeast-2`)
 
@@ -17,7 +17,7 @@ Browser (drive.nodepulsecaringal.xyz)
   └── Cloudflare (proxied — DDoS protection, hides AWS URL)
         └── API Gateway v2 (HTTP API, custom domain, $default catch-all)
               └── Lambda (Python 3.12 — Django 5 + Mangum)
-                    ├── Cognito            (auth — signup, verify, signin, forgot/reset)
+                    ├── Admin auth         (single-admin — ADMIN_EMAIL + ADMIN_PASSWORD env vars)
                     ├── Neon PostgreSQL    (file + folder metadata, batch job tracking)
                     ├── S3                 (file storage — private, per-user folder prefix)
                     │     └── Direct browser upload via presigned POST URL
@@ -76,9 +76,11 @@ Terraform Remote State
 | `hello-world` | Minimal Django hello world |
 | `CRUD` | Django CRUD with HTMX inline edits |
 | `auth` | AWS Cognito authentication flows |
-| `novadrive` | **Current** — full file storage app |
+| `novadrive` | Full file storage app (Cognito auth) |
+| `v2-novadrive` | Full file storage app — Cognito auth, Alpine.js search |
+| `v3-novadrive` | **Current** — single-admin auth (no Cognito), Alpine.js throughout |
 
-CI/CD triggers on push to `novadrive`. See [.github/workflows/deploy.yml](.github/workflows/deploy.yml).
+CI/CD triggers on push to `v3-novadrive`. See [.github/workflows/deploy.yml](.github/workflows/deploy.yml).
 
 ---
 
@@ -135,7 +137,7 @@ Files in Deep Archive can be restored (request → 12-48h → ready email → 7-
 - **Context menu** — right-click files/folders; items shown/hidden based on selection type and count
 - **Selection-aware labels** — "Delete files (3)", "Download as Zip (1)", etc.
 - **Toast stack** — progress, success, and error toasts; zip jobs show live progress bar
-- **Search** — searches files and folders by name (HTMX partial response)
+- **Search** — searches files and folders by name globally (Alpine.js fetch, debounced 300ms)
 - **Responsive sidebar** — full sidebar on desktop; hamburger drawer on mobile with backdrop
 
 ---
@@ -159,10 +161,10 @@ Files in Deep Archive can be restored (request → 12-48h → ready email → 7-
 │       │       ├── base.py         # Shared settings, SSM fetches, AWS config
 │       │       ├── dev.py          # DEBUG=True, no SSM
 │       │       └── prod.py         # Secure headers, CSRF, session cookies
-│       ├── accounts/               # Cognito auth app
-│       │   ├── decorators.py       # @cognito_login_required
-│       │   ├── forms.py
-│       │   ├── views.py            # signup, verify, signin, signout, forgot/reset
+│       ├── accounts/               # Single-admin auth app
+│       │   ├── decorators.py       # @cognito_login_required (checks session key)
+│       │   ├── forms.py            # SignInForm only
+│       │   ├── views.py            # signin, signout, dashboard
 │       │   └── urls.py
 │       ├── drive/                  # Main storage app
 │       │   ├── models.py           # DriveFile, DriveFolder, BatchJob
@@ -184,7 +186,7 @@ Files in Deep Archive can be restored (request → 12-48h → ready email → 7-
 │       │           ├── folder_row.html        # Folder row (list + grid)
 │       │           ├── recycle_row.html       # Bin file row (thumbnails, days-left badge)
 │       │           ├── recycle_folder_row.html
-│       │           ├── search_results.html    # HTMX partial for search + drive listing
+│       │           ├── search_results.html    # Search results partial (rendered by Alpine.js fetch)
 │       │           └── sidebar_folder.html    # Sidebar folder tree node
 │       └── static/
 ├── terraform-state/                # Run once to bootstrap S3 + DynamoDB state backend
@@ -192,7 +194,6 @@ Files in Deep Archive can be restored (request → 12-48h → ready email → 7-
 ├── cloudfront_drive.tf             # CloudFront distribution (OAC, signed URLs)
 ├── cloudfront_keys.tf              # RSA key pair → SSM + CloudFront key group
 ├── cloudwatch.tf                   # Log group (14d), 4xx alarm, spike alarm
-├── cognito.tf                      # User Pool + App Client
 ├── custom_domain.tf                # ACM cert (DNS validation) + API Gateway custom domain
 ├── iam.tf                          # Lambda execution role + SSM/S3/CloudFront policies
 ├── lambda.tf                       # Lambda function + env vars
@@ -211,7 +212,7 @@ Files in Deep Archive can be restored (request → 12-48h → ready email → 7-
 
 ### DriveFolder
 ```
-owner_sub       CharField(128)    Cognito user sub — scopes all data per user
+owner_sub       CharField(128)    Owner identifier — always "admin" in v3
 name            CharField(255)
 parent          ForeignKey(self)  Nullable — root folders have no parent
 created_at      DateTimeField     Auto
@@ -221,7 +222,7 @@ Unique: (owner_sub, parent, name)
 
 ### DriveFile
 ```
-owner_sub           CharField(128)    Cognito user sub
+owner_sub           CharField(128)    Owner identifier — always "admin" in v3
 folder              ForeignKey(DriveFolder, nullable)
 name                CharField(255)
 s3_key              CharField(512, unique)   {sub}/{folder_path}/{filename}
@@ -254,13 +255,9 @@ expires_at   DateTimeField    Nullable — 24h after READY
 
 ### Auth (`accounts/urls.py`)
 ```
-GET/POST  /signup/              Sign up (Cognito sign_up)
-GET/POST  /verify/              6-digit email verification
-GET/POST  /signin/              Sign in (USER_PASSWORD_AUTH)
-GET       /signout/             Clear session + Cognito global_sign_out
+GET/POST  /signin/              Sign in (hmac credential check, sets session)
+GET       /signout/             Flush session
 GET       /dashboard/           Account info
-GET/POST  /forgot-password/     Send reset code
-GET/POST  /reset-password/      Submit code + new password
 ```
 
 ### Drive (`drive/urls.py`)
@@ -308,8 +305,8 @@ POST  /drive/bin/bulk-delete/             Bulk permanent delete (JSON)
 | Variable | Description |
 |----------|-------------|
 | `DJANGO_SETTINGS_MODULE` | `config.settings.prod` |
-| `COGNITO_USER_POOL_ID` | Cognito User Pool ID |
-| `COGNITO_CLIENT_ID` | Cognito App Client ID |
+| `ADMIN_EMAIL` | Single admin email address |
+| `ADMIN_PASSWORD` | Single admin password (set via Terraform variable) |
 | `DRIVE_BUCKET_NAME` | S3 bucket for user files |
 | `CLOUDFRONT_DOMAIN` | CloudFront distribution domain |
 | `CLOUDFRONT_KEY_PAIR_ID` | CloudFront public key ID |
@@ -327,7 +324,7 @@ Secrets (`DATABASE_URL`, Resend API key, CloudFront RSA private key) are stored 
 
 ## S3 Key Structure
 
-Every file is stored under the owner's Cognito sub, with the full folder path reflected:
+Every file is stored under the owner's sub (fixed string `"admin"` for the single-admin setup), with the full folder path reflected:
 
 ```
 {owner_sub}/                          ← root files
@@ -392,8 +389,10 @@ terraform apply
 ### 2. Create terraform.tfvars
 
 ```hcl
-database_url  = "postgresql://user:password@host.neon.tech/dbname?sslmode=require"
-custom_domain = "drive.yourdomain.com"
+database_url           = "postgresql://user:password@host.neon.tech/dbname?sslmode=require"
+custom_domain          = "drive.yourdomain.com"
+cognito_admin_email    = "you@example.com"
+cognito_admin_password = "YourStr0ngPassword1"
 ```
 
 ### 3. Add GitHub Actions secrets
@@ -404,12 +403,12 @@ custom_domain = "drive.yourdomain.com"
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key |
 | `DATABASE_URL` | Neon connection string (used by CI to run migrations) |
 
-IAM user needs: Lambda, API Gateway, IAM, S3, DynamoDB, SSM, Cognito, CloudFront, ACM, SNS, Batch.
+IAM user needs: Lambda, API Gateway, IAM, S3, DynamoDB, SSM, CloudFront, ACM, SNS, Batch.
 
 ### 4. Deploy
 
 ```bash
-git push origin novadrive
+git push origin v3-novadrive
 ```
 
 GitHub Actions: install deps → `manage.py migrate` → `terraform plan` → `terraform apply`.
@@ -423,7 +422,7 @@ AWS sends a confirmation email after the first deploy. Click **Confirm subscript
 ## CI/CD Pipeline
 
 ```
-push to novadrive
+push to v3-novadrive
     ├── pip install -r requirements.txt -t lambda/serverless_web_app/   (vendor deps for Lambda zip)
     ├── pip install -r requirements.txt                                   (for manage.py)
     ├── python manage.py migrate
@@ -444,7 +443,7 @@ python manage.py migrate
 python manage.py runserver
 ```
 
-Uses `config.settings.dev` (DEBUG=True, no SSM, no Cognito). Set real `AWS_*` env vars if you need S3/Cognito locally.
+Uses `config.settings.dev` (DEBUG=True, no SSM). Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` env vars for auth, and real `AWS_*` env vars if you need S3 locally.
 
 ---
 
@@ -482,7 +481,6 @@ SNS email alerts. Defined in `sns.tf` + `cloudwatch.tf`.
 | S3 (Glacier IR) | — | ~$0.004/GB/mo |
 | S3 (Deep Archive) | — | ~$0.00099/GB/mo |
 | AWS Batch / Fargate | — | ~$0.04048/vCPU-hr |
-| Cognito | 50,000 MAU | $0.0055/MAU |
 | ACM Certificate | Free | Always free |
 | CloudWatch Logs | 5GB ingestion | ~$0.50/GB |
 | SSM Parameter Store | 10,000 API calls/mo | $0 (standard) |
@@ -513,8 +511,8 @@ Lambda has a 15-minute execution timeout and limited memory. Large folder trees 
 **Why soft delete (Recycle Bin) instead of immediate S3 deletion?**
 Accidental deletes are common. A 30-day recycle bin lets users recover files without contacting support. The DB `deleted_at` field gates all queries; the S3 object is only deleted on permanent deletion.
 
-**Why `generate_secret = false` on the Cognito App Client?**
-Lambda handles all auth calls server-side via IAM role — a client secret is not needed, and it cannot be safely stored in a browser anyway.
+**Why single-admin instead of Cognito?**
+For a personal cloud drive with one owner, Cognito adds cost, complexity (User Pool, App Client, hosted UI, token refresh), and dependencies. A single `hmac.compare_digest` check against env-var credentials — encrypted at rest by AWS Lambda — achieves the same session security at zero extra cost and with far less infrastructure.
 
 **Why Cloudflare proxy ON?**
 Public DNS returns Cloudflare IPs, not the raw API Gateway domain — DDoS protection at the edge and AWS infrastructure is not exposed.
