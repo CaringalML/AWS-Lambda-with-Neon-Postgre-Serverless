@@ -35,6 +35,7 @@ resource "aws_lambda_function" "serverless_web_app" {
       DRIVE_FROM_EMAIL                = "drive@nodepulsecaringal.xyz"
       BATCH_JOB_QUEUE                 = aws_batch_job_queue.novadrive.name
       BATCH_JOB_DEFINITION            = aws_batch_job_definition.zip_folder.name
+      COGNITO_USER_POOL_ID            = aws_cognito_user_pool.main.id
     }
   }
 

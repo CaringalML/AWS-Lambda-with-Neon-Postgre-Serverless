@@ -158,6 +158,7 @@ resource "aws_iam_role_policy" "lambda_cognito" {
           "cognito-idp:ConfirmSignUp",
           "cognito-idp:InitiateAuth",
           "cognito-idp:GetUser",
+          "cognito-idp:AdminGetUser",
           "cognito-idp:GlobalSignOut",
         ]
         Resource = aws_cognito_user_pool.main.arn

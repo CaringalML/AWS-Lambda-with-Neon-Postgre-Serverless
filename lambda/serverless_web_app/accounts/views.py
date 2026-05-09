@@ -40,6 +40,20 @@ def signin(request):
             request.session["access_token"] = "admin"
             request.session["user_sub"]     = "admin"
             request.session["user_email"]   = settings.ADMIN_EMAIL
+            if settings.COGNITO_USER_POOL_ID:
+                try:
+                    idp = boto3.client("cognito-idp", region_name=settings.AWS_REGION)
+                    resp = idp.admin_get_user(
+                        UserPoolId=settings.COGNITO_USER_POOL_ID,
+                        Username=settings.ADMIN_EMAIL,
+                    )
+                    sub = next(
+                        (a["Value"] for a in resp["UserAttributes"] if a["Name"] == "sub"),
+                        "admin",
+                    )
+                    request.session["user_cognito_sub"] = sub
+                except Exception:
+                    request.session["user_cognito_sub"] = "admin"
             return redirect("drive_home")
         form.add_error(None, "Invalid email or password.")
     return render(request, "accounts/signin.html", {"form": form})
@@ -50,7 +64,7 @@ def dashboard(request):
     user = {
         "email":          request.session.get("user_email", ""),
         "email_verified": True,
-        "sub":            "admin",
+        "sub":            request.session.get("user_cognito_sub", "admin"),
         "username":       request.session.get("user_email", ""),
     }
     return render(request, "accounts/dashboard.html", {"user": user})
