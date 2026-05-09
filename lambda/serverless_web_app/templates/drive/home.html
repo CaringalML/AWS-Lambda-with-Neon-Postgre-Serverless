@@ -769,7 +769,7 @@ document.addEventListener('alpine:init', () => {
             {# My Drive (root) #}
             <a href="{% url 'drive_home' %}"
                class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-100
-                      {% if not current_folder and not is_archive_view and not is_recycle_bin %}bg-sky-500/15 text-sky-400 border border-sky-500/20{% else %}text-zinc-400 hover:bg-white/5 hover:text-zinc-200{% endif %}">
+                      {% if not current_folder and not is_archive_view and not is_recycle_bin and not is_timeline_view %}bg-sky-500/15 text-sky-400 border border-sky-500/20{% else %}text-zinc-400 hover:bg-white/5 hover:text-zinc-200{% endif %}">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 012-2h3.586a1 1 0 01.707.293L10.414 6.5H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
                 </svg>
