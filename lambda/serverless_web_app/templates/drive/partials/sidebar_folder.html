@@ -12,7 +12,7 @@ Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer
 }">
 
     {# Row #}
-    <div class="flex items-center rounded-lg transition-colors duration-100
+    <div class="flex items-center rounded-lg transition-colors duration-100 min-w-full
                 {% if current_folder.pk == folder.pk %}bg-sky-500/15 text-sky-300{% else %}text-zinc-500 hover:bg-white/5 hover:text-sky-300{% endif %}"
          style="padding-left: calc(0.75rem + {{ depth|default:0 }} * 0.875rem);">
 
