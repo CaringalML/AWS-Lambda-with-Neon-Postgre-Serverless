@@ -82,7 +82,7 @@ resource "aws_iam_role_policy" "lambda_ssm_admin_password" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
+        Action   = ["ssm:GetParameter", "ssm:PutParameter"]
         Resource = aws_ssm_parameter.admin_password.arn
       }
     ]

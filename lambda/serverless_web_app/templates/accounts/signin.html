@@ -139,7 +139,10 @@
                         {{ form.email }}
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-slate-400 mb-1.5">Password</label>
+                        <div class="flex items-center justify-between mb-1.5">
+                            <label class="block text-sm font-medium text-slate-400">Password</label>
+                            <a href="{% url 'forgot_password' %}" class="text-xs text-sky-400 hover:text-sky-300 transition-colors">Forgot password?</a>
+                        </div>
                         {{ form.password }}
                     </div>
 
