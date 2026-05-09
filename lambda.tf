@@ -22,8 +22,8 @@ resource "aws_lambda_function" "serverless_web_app" {
       # DB credentials fetched from SSM at runtime — not stored as plain text here
       SSM_DATABASE_URL_NAME  = aws_ssm_parameter.database_url.name
       # Single-admin auth
-      ADMIN_EMAIL    = var.cognito_admin_email
-      ADMIN_PASSWORD = var.cognito_admin_password
+      ADMIN_EMAIL              = var.cognito_admin_email
+      SSM_ADMIN_PASSWORD_NAME  = aws_ssm_parameter.admin_password.name
       # NovaDrive
       DRIVE_BUCKET_NAME               = aws_s3_bucket.drive.bucket
       CLOUDFRONT_DOMAIN               = aws_cloudfront_distribution.drive.domain_name

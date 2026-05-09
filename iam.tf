@@ -72,6 +72,23 @@ resource "aws_iam_role_policy" "lambda_s3_drive" {
   })
 }
 
+# Allow Lambda to read the admin password from SSM
+resource "aws_iam_role_policy" "lambda_ssm_admin_password" {
+  name = "${var.lambda_function_name}-${var.environment}-ssm-admin-password-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = aws_ssm_parameter.admin_password.arn
+      }
+    ]
+  })
+}
+
 # Allow Lambda to read the CloudFront signing private key from SSM
 resource "aws_iam_role_policy" "lambda_ssm_cloudfront_key" {
   name = "${var.lambda_function_name}-${var.environment}-ssm-cf-key-policy"
