@@ -29,4 +29,5 @@ urlpatterns = [
     path("folder/<int:pk>/zip/",          views.zip_folder,         name="drive_zip_folder"),
     path("folders/zip/",                  views.zip_folder,         name="drive_zip_folders"),
     path("job/<int:job_id>/status/",      views.job_status,         name="drive_job_status"),
+    path("timeline/",                      views.timeline_view,       name="drive_timeline"),
 ]

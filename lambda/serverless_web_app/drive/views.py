@@ -428,6 +428,14 @@ def confirm_upload(request):
             Key=data["s3_key"],
         )
 
+        captured_at = None
+        captured_at_str = data.get("captured_at")
+        if captured_at_str:
+            try:
+                captured_at = datetime.datetime.fromisoformat(captured_at_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                pass
+
         drive_file, created = DriveFile.objects.update_or_create(
             s3_key=data["s3_key"],
             defaults={
@@ -440,6 +448,7 @@ def confirm_upload(request):
                 "deleted_at": None,
                 "restore_status": "",
                 "restore_expires_at": None,
+                "captured_at": captured_at,
             },
         )
 
@@ -1157,3 +1166,66 @@ def job_status(request, job_id):
         return JsonResponse({"status": "ready", "progress": 100, "url": url})
 
     return JsonResponse({"status": job.status, "progress": job.progress})
+
+
+@cognito_login_required
+def timeline_view(request):
+    """Google Photos-style timeline: all media grouped by capture/upload date, newest first."""
+    import itertools
+    from django.db.models import Q, Prefetch
+    from django.db.models.functions import Coalesce
+
+    owner_sub = _get_owner_sub(request)
+
+    media = list(
+        DriveFile.objects.filter(
+            owner_sub=owner_sub,
+            deleted_at__isnull=True,
+        ).filter(
+            Q(content_type__startswith="image/") | Q(content_type__startswith="video/")
+        ).filter(
+            Q(storage_class=DriveFile.GLACIER_IR)
+            | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
+        ).annotate(
+            effective_date=Coalesce("captured_at", "uploaded_at")
+        ).order_by("-effective_date")
+    )
+
+    # Group by calendar date (effective_date already set per file)
+    def _date_key(f):
+        return f.effective_date.date() if f.effective_date else datetime.date.min
+
+    groups = [
+        {"date": date, "files": list(files)}
+        for date, files in itertools.groupby(media, key=_date_key)
+    ]
+
+    active_subfolders = DriveFolder.objects.filter(deleted_at__isnull=True)
+    sidebar_folders = DriveFolder.objects.filter(
+        owner_sub=owner_sub, parent=None, deleted_at__isnull=True
+    ).prefetch_related(
+        Prefetch('subfolders', queryset=active_subfolders),
+        Prefetch('subfolders__subfolders', queryset=active_subfolders),
+        Prefetch('subfolders__subfolders__subfolders', queryset=active_subfolders),
+    )
+    _, storage_used, storage_pct = _storage_stats(owner_sub)
+    total_files = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True).count()
+
+    ctx = {
+        "groups": groups,
+        "total_media": len(media),
+        "is_timeline_view": True,
+        "sidebar_folders": sidebar_folders,
+        "storage_used": storage_used,
+        "storage_pct": storage_pct,
+        "total_files": total_files,
+        "files": DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True),
+        "subfolders": DriveFolder.objects.none(),
+        "current_folder": None,
+        "breadcrumbs": [],
+        "search_query": "",
+    }
+
+    response = render(request, "drive/home.html", ctx)
+    response["Cache-Control"] = "no-store"
+    return response

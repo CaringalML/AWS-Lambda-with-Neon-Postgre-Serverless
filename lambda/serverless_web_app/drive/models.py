@@ -69,7 +69,8 @@ class DriveFile(models.Model):
     restore_notify_email = models.EmailField(blank=True, default="")
     restore_expires_at   = models.DateTimeField(null=True, blank=True)
 
-    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    deleted_at   = models.DateTimeField(null=True, blank=True, db_index=True)
+    captured_at  = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
         ordering = ["-uploaded_at"]
