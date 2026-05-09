@@ -1087,7 +1087,7 @@ document.addEventListener('alpine:init', () => {
                         <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z"/>
                     </svg>
                     <input type="text" name="q" value="{{ search_query }}"
-                           placeholder="Search files and folders…"
+                           placeholder="{% if is_timeline_view %}Search photos and videos…{% elif is_archive_view %}Search archived files…{% elif is_recycle_bin %}Search deleted files…{% else %}Search files and folders…{% endif %}"
                            class="w-full bg-[#13151c] border border-zinc-700/60 hover:border-zinc-600 focus:border-sky-500 rounded-xl pl-9 pr-4 py-2 text-sm text-zinc-100 placeholder-zinc-500 transition-colors"
                            data-search-url="{% if is_recycle_bin %}{% url 'drive_bin' %}{% elif is_archive_view %}{% url 'drive_archive_view' %}{% elif is_timeline_view %}{% url 'drive_timeline' %}{% elif current_folder %}{% url 'drive_folder' folder_pk=current_folder.pk %}{% else %}{% url 'drive_home' %}{% endif %}"
                            @input.debounce.300ms="doSearch($el.value, $el.dataset.searchUrl)">
