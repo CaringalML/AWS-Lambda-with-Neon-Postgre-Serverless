@@ -1516,18 +1516,21 @@ document.addEventListener('alpine:init', () => {
         </div>
 
         {# Content area #}
-        <div class="flex-1 overflow-auto flex items-center justify-center bg-slate-950 relative">
+        <div class="flex-1 overflow-auto flex items-center justify-center bg-slate-950 relative"
+             x-data="{ _tx: null }"
+             @touchstart.passive="_tx = $event.changedTouches[0].clientX"
+             @touchend.passive="if (_tx !== null) { const dx = $event.changedTouches[0].clientX - _tx; if (Math.abs(dx) > 50) { dx < 0 ? nextFile() : prevFile(); } _tx = null; }">
 
-            {# Prev button #}
+            {# Prev button — desktop only; mobile uses swipe #}
             <button x-show="_previewList.length > 1" @click="prevFile()"
-                    class="absolute left-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 flex items-center justify-center rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors duration-150"
+                    class="absolute left-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 hidden md:flex items-center justify-center rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors duration-150"
                     title="Previous (←)">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
             </button>
 
-            {# Next button #}
+            {# Next button — desktop only; mobile uses swipe #}
             <button x-show="_previewList.length > 1" @click="nextFile()"
-                    class="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 flex items-center justify-center rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors duration-150"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 hidden md:flex items-center justify-center rounded-full bg-black/50 hover:bg-black/80 text-white transition-colors duration-150"
                     title="Next (→)">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
             </button>
