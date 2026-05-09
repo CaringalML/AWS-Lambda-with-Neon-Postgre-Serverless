@@ -203,7 +203,7 @@ Files in Deep Archive can be restored (request → 12-48h → ready email → 7-
 ├── ssm.tf                          # SSM SecureString for DB URL
 ├── variables.tf
 ├── versions.tf                     # Terraform version + S3 backend
-└── terraform.tfvars                # Secrets — gitignored
+└── env.example                     # GitHub Actions secrets reference (all required secrets listed)
 ```
 
 ---
@@ -386,26 +386,26 @@ terraform apply
 
 > Change `maangasserverless` in `terraform-state/variables.tf` and `versions.tf` if the bucket name is taken.
 
-### 2. Create terraform.tfvars
+### 2. Add GitHub Actions secrets
 
-```hcl
-database_url           = "postgresql://user:password@host.neon.tech/dbname?sslmode=require"
-custom_domain          = "drive.yourdomain.com"
-cognito_admin_email    = "you@example.com"
-cognito_admin_password = "YourStr0ngPassword1"
-```
-
-### 3. Add GitHub Actions secrets
+Go to **GitHub repo → Settings → Secrets and variables → Actions** and add every secret listed in [env.example](env.example).
 
 | Secret | Description |
 |--------|-------------|
 | `AWS_ACCESS_KEY_ID` | IAM access key |
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key |
-| `DATABASE_URL` | Neon connection string (used by CI to run migrations) |
+| `DATABASE_URL` | Neon connection string (used by CI migrations and Terraform) |
+| `RESEND_API_KEY` | Resend API key for transactional email |
+| `ADMIN_EMAIL` | Admin login email address |
+| `ADMIN_PASSWORD` | Admin login password — seeded into SSM on first deploy, never overwritten after |
+| `DOCKERHUB_USERNAME` | Docker Hub username (for pushing the Batch worker image) |
+| `DOCKERHUB_TOKEN` | Docker Hub access token |
 
 IAM user needs: Lambda, API Gateway, IAM, S3, DynamoDB, SSM, CloudFront, ACM, SNS, Batch.
 
-### 4. Deploy
+> `terraform.tfvars` is not used — all values come from GitHub Actions secrets via `TF_VAR_*` env vars.
+
+### 3. Deploy
 
 ```bash
 git push origin v3-novadrive
@@ -413,7 +413,7 @@ git push origin v3-novadrive
 
 GitHub Actions: install deps → `manage.py migrate` → `terraform plan` → `terraform apply`.
 
-### 5. Confirm SNS subscription
+### 4. Confirm SNS subscription
 
 AWS sends a confirmation email after the first deploy. Click **Confirm subscription** or alarms won't deliver.
 
