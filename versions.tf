@@ -16,11 +16,11 @@ terraform {
     }
   }
 
-  # Remote state backend — bucket and table are created by terraform-state/
-  # Run `terraform -chdir=terraform-state apply` once before using this backend.
+  # Remote state is stored inside the drive bucket under the terraform/ prefix.
+  # The DynamoDB lock table is still used for safe concurrent access.
   backend "s3" {
-    bucket         = "maangasserverless" # must match terraform-state/variables.tf
-    key            = "serverless-web-app/terraform.tfstate"
+    bucket         = "serverless-web-app-drive-dev"
+    key            = "terraform/terraform.tfstate"
     region         = "ap-southeast-2"
     dynamodb_table = "terraform-state-lock"
     encrypt        = true
