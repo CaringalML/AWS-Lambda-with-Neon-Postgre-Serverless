@@ -715,12 +715,23 @@ document.addEventListener('alpine:init', () => {
                         if (open) {
                             const c = {};
                             document.querySelectorAll('[data-file-pk][data-name]').forEach(el => {
+                                const ct   = el.dataset.contentType || '';
                                 const name = el.dataset.name || '';
-                                const dot  = name.lastIndexOf('.');
-                                const ext  = dot >= 0 ? name.slice(dot + 1).toUpperCase() : 'NO EXT';
-                                c[ext] = (c[ext] || 0) + 1;
+                                let key;
+                                if      (ct.startsWith('image/')) key = 'Photos';
+                                else if (ct.startsWith('video/')) key = 'Videos';
+                                else {
+                                    const dot = name.lastIndexOf('.');
+                                    key = dot >= 0 ? name.slice(dot + 1).toUpperCase() : 'NO EXT';
+                                }
+                                c[key] = (c[key] || 0) + 1;
                             });
-                            counts = Object.entries(c).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                            counts = Object.entries(c).sort((a, b) => {
+                                const order = { Photos: 0, Videos: 1 };
+                                const oa = order[a[0]] ?? 2, ob = order[b[0]] ?? 2;
+                                if (oa !== ob) return oa - ob;
+                                return b[1] - a[1] || a[0].localeCompare(b[0]);
+                            });
                         }
                     " class="flex items-center gap-1 text-[11px] text-zinc-500 font-medium uppercase tracking-wide hover:text-zinc-300 transition-colors">
                         Files
