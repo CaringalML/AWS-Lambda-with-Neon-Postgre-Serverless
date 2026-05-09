@@ -2,7 +2,7 @@ name: Deploy Infrastructure
 
 # EDIT ONLY THIS LINE
 env:
-  TARGET_BRANCH: v2-novadrive  # Switch to 'hello-world', 'CRUD', 'auth', 'novadrive', or 'v2-novadrive' as needed.
+  TARGET_BRANCH: v3-novadrive  # Switch to 'hello-world', 'CRUD', 'auth', 'novadrive', 'v2-novadrive', or 'v3-novadrive' as needed.
   AWS_REGION: ap-southeast-2
   TF_VERSION: 1.6.6
   PYTHON_VERSION: "3.12"
@@ -10,9 +10,9 @@ env:
 on:
   push:
     # EDIT THIS to match TARGET_BRANCH above
-    branches: ["v2-novadrive"]
+    branches: ["v3-novadrive"]
   pull_request:
-    branches: ["v2-novadrive"]
+    branches: ["v3-novadrive"]
   workflow_dispatch:
 
 jobs:
@@ -70,6 +70,8 @@ jobs:
         env:
           TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
           TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
+          TF_VAR_cognito_admin_email: ${{ secrets.ADMIN_EMAIL }}
+          TF_VAR_cognito_admin_password: ${{ secrets.ADMIN_PASSWORD }}
         run: terraform plan -no-color -out=tfplan
         continue-on-error: true
 
@@ -117,6 +119,8 @@ jobs:
         env:
           TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
           TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
+          TF_VAR_cognito_admin_email: ${{ secrets.ADMIN_EMAIL }}
+          TF_VAR_cognito_admin_password: ${{ secrets.ADMIN_PASSWORD }}
         run: terraform apply -auto-approve tfplan
 
       - name: Terraform Output
