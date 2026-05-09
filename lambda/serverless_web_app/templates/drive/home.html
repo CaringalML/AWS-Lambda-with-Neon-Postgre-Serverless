@@ -708,22 +708,19 @@ document.addEventListener('alpine:init', () => {
                 <span class="text-[11px] text-zinc-500 font-medium uppercase tracking-wide">Folders</span>
                 <span class="text-[11px] text-zinc-400 font-medium">{{ subfolders|length }}</span>
             </div>
-            <div x-data="{ open: false, counts: {} }">
+            <div x-data="{ open: false, counts: [] }">
                 <div class="flex items-center justify-between">
                     <button @click="
                         open = !open;
                         if (open) {
-                            const els = document.querySelectorAll('[data-file-pk][data-content-type]');
-                            const c = { Photos: 0, Videos: 0, PDFs: 0, Audio: 0, Others: 0 };
-                            els.forEach(el => {
-                                const ct = el.dataset.contentType || '';
-                                if      (ct.startsWith('image/'))     c.Photos++;
-                                else if (ct.startsWith('video/'))     c.Videos++;
-                                else if (ct === 'application/pdf')    c.PDFs++;
-                                else if (ct.startsWith('audio/'))     c.Audio++;
-                                else                                   c.Others++;
+                            const c = {};
+                            document.querySelectorAll('[data-file-pk][data-name]').forEach(el => {
+                                const name = el.dataset.name || '';
+                                const dot  = name.lastIndexOf('.');
+                                const ext  = dot >= 0 ? name.slice(dot + 1).toUpperCase() : 'NO EXT';
+                                c[ext] = (c[ext] || 0) + 1;
                             });
-                            counts = c;
+                            counts = Object.entries(c).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
                         }
                     " class="flex items-center gap-1 text-[11px] text-zinc-500 font-medium uppercase tracking-wide hover:text-zinc-300 transition-colors">
                         Files
@@ -732,9 +729,9 @@ document.addEventListener('alpine:init', () => {
                     <span class="text-[11px] text-zinc-400 font-medium">{{ files|length }}</span>
                 </div>
                 <div x-show="open" x-cloak class="mt-1.5 space-y-1 border-l border-zinc-800 ml-1 pl-2.5">
-                    <template x-for="[label, count] in Object.entries(counts).filter(([,v]) => v > 0)" :key="label">
+                    <template x-for="[ext, count] in counts" :key="ext">
                         <div class="flex items-center justify-between">
-                            <span class="text-[10px] text-zinc-600 uppercase tracking-wide" x-text="label"></span>
+                            <span class="text-[10px] text-zinc-600 uppercase tracking-wide" x-text="ext"></span>
                             <span class="text-[10px] text-zinc-500 font-medium tabular-nums" x-text="count"></span>
                         </div>
                     </template>
