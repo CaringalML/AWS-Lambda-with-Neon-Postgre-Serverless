@@ -723,6 +723,21 @@ document.addEventListener('alpine:init', () => {
         },
 
         doSearch(q, url) {
+            // Timeline: client-side filter by filename
+            const timeline = document.getElementById('timeline-content');
+            if (timeline) {
+                const term = q.trim().toLowerCase();
+                timeline.querySelectorAll('[data-file-pk]').forEach(el => {
+                    const name = (el.dataset.name || '').toLowerCase();
+                    el.style.display = (!term || name.includes(term)) ? '' : 'none';
+                });
+                // Hide date-group headers with no visible items
+                timeline.querySelectorAll('.timeline-group').forEach(group => {
+                    const anyVisible = [...group.querySelectorAll('[data-file-pk]')].some(el => el.style.display !== 'none');
+                    group.style.display = anyVisible ? '' : 'none';
+                });
+                return;
+            }
             const qs = q ? '?q=' + encodeURIComponent(q) : '';
             fetch(url + qs, { headers: { 'HX-Request': 'true' } })
                 .then(r => r.text())
@@ -1188,13 +1203,13 @@ document.addEventListener('alpine:init', () => {
             <div id="timeline-content">
                 {% if groups %}
                 {% for group in groups %}
-                <div class="mb-8">
+                <div class="mb-8 timeline-group">
                     <h2 class="text-sm font-semibold text-zinc-300 mb-3 sticky top-0 bg-[#0d0f14] py-1 z-10">
                         {{ group.date|date:"F j, Y" }}
                     </h2>
                     <div class="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-1">
                         {% for file in group.files %}
-                        <div class="aspect-square bg-zinc-800 overflow-hidden rounded-lg cursor-pointer relative"
+                        <div class="aspect-square bg-zinc-800 overflow-hidden rounded-lg cursor-pointer relative group/cell"
                              data-file-pk="{{ file.pk }}"
                              data-content-type="{{ file.content_type }}"
                              data-name="{{ file.name|escapejs }}"
@@ -1217,6 +1232,12 @@ document.addEventListener('alpine:init', () => {
                                  alt="{{ file.name|escapejs }}"
                                  class="w-full h-full object-cover">
                             {% endif %}
+                            {# Name + size overlay #}
+                            <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/75 to-transparent px-1.5 py-1.5 pointer-events-none
+                                        opacity-0 group-hover/cell:opacity-100 transition-opacity duration-150">
+                                <p class="text-white text-[9px] font-medium truncate leading-tight">{{ file.name }}</p>
+                                <p class="text-white/60 text-[8px] truncate leading-tight">{{ file.size_display }}</p>
+                            </div>
                         </div>
                         {% endfor %}
                     </div>
