@@ -32,12 +32,12 @@ Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer
 
         {# Folder icon + name #}
         <a href="{% url 'drive_folder' folder.pk %}"
-           class="flex items-center gap-1.5 flex-1 min-w-0 py-1.5 pr-2 text-sm">
+           class="flex items-center gap-1.5 flex-1 py-1.5 pr-2 text-sm">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 shrink-0 text-yellow-400"
                  fill="currentColor" viewBox="0 0 24 24">
                 <path d="M10.414 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-6.586L10.414 3z"/>
             </svg>
-            <span class="truncate">{{ folder.name }}</span>
+            <span class="whitespace-nowrap">{{ folder.name }}</span>
         </a>
     </div>
 
