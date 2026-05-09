@@ -919,13 +919,14 @@ document.addEventListener('alpine:init', () => {
     </aside>
 
     {# ═══════════════════ MAIN CONTENT ═══════════════════ #}
-    <div class="flex-1 flex flex-col overflow-y-auto"
+    <div class="flex-1 flex flex-col overflow-hidden"
          @keydown.ctrl.a.window.prevent="selectAll()"
          @keydown.meta.a.window.prevent="selectAll()"
          @click.self="selected = []; selectedFolders = []; closeCtx()"
          @contextmenu.self.prevent=""
          @click.window="closeCtx()">
-        <div class="p-4 md:p-6 flex-1">
+        {# ── Pinned header (breadcrumb + search + toolbar) ── #}
+        <div class="px-4 md:px-6 pt-4 md:pt-6 shrink-0">
 
             {# ── Breadcrumb / Archive heading ── #}
             {% if is_archive_view %}
@@ -1175,8 +1176,10 @@ document.addEventListener('alpine:init', () => {
             </div>
             {% endif %}{# /not is_archive_view and not is_recycle_bin and not is_timeline_view #}
 
-            {# Upload progress moved to toast stack no inline bar needed #}
+        </div>{# /pinned header #}
 
+        {# ── Scrollable file listing area ── #}
+        <div class="flex-1 overflow-y-auto px-4 md:px-6 pb-4 md:pb-6">
 
             {# ── Timeline view OR normal file listing ── #}
             {% if is_timeline_view %}
@@ -1236,7 +1239,7 @@ document.addEventListener('alpine:init', () => {
             </div>
             {% endif %}
 
-        </div>{# /p-6 #}
+        </div>{# /scrollable listing #}
     </div>{# /main content #}
 
     {# ═══════════════════ CONTEXT MENU ═══════════════════ #}
