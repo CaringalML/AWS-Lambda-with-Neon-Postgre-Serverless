@@ -36,9 +36,16 @@
                 <span class="text-slate-400">Email</span>
                 <span class="text-slate-100">{{ user.email }}</span>
             </div>
-            <div class="flex justify-between items-center px-6 py-3 text-sm gap-4">
-                <span class="text-slate-400 shrink-0">Cognito ID</span>
-                <span class="text-slate-500 font-mono text-xs truncate">{{ user.sub }}</span>
+            <div class="px-6 py-3 text-sm">
+                <div class="flex justify-between items-center gap-4">
+                    <span class="text-slate-400 shrink-0">Cognito ID</span>
+                    <span class="text-slate-500 font-mono text-xs">{{ user.sub }}</span>
+                </div>
+                <p class="mt-1.5 text-xs text-slate-600 leading-relaxed">
+                    This app uses a custom single-admin auth system instead of a full Cognito sign-in flow,
+                    so the real Cognito UUID is not available in the session. All your files are stored
+                    under this internal identifier.
+                </p>
             </div>
         </div>
     </div>
