@@ -286,7 +286,9 @@ document.addEventListener('alpine:init', () => {
 
         async openPreview(pk) {
             const items = document.querySelectorAll('[data-file-pk]');
-            this._previewList = Array.from(items).map(el => parseInt(el.dataset.filePk));
+            this._previewList = Array.from(items)
+                .filter(el => { const ct = el.dataset.contentType || ''; return ct.startsWith('image/') || ct.startsWith('video/'); })
+                .map(el => parseInt(el.dataset.filePk));
             this._previewIdx = this._previewList.indexOf(parseInt(pk));
             await this._loadPreview(pk);
         },

@@ -1,5 +1,6 @@
 <div id="file-{{ file.pk }}"
      data-file-pk="{{ file.pk }}"
+     data-content-type="{{ file.content_type }}"
      data-name="{{ file.name|escapejs }}"
      class="bg-[#13151c] border rounded-xl transition-all duration-100 cursor-pointer select-none overflow-hidden"
      :class="isSelected({{ file.pk }}) ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
