@@ -155,11 +155,7 @@
                     </div>
                     {% endblock nav_extra %}
                 {% else %}
-                    <a href="{% url 'signin' %}" class="text-zinc-400 hover:text-sky-400 transition-colors duration-150">Sign in</a>
-                    <a href="{% url 'signup' %}"
-                       class="bg-sky-500 hover:bg-sky-600 active:scale-95 active:bg-sky-700 text-white font-semibold px-4 py-1.5 rounded-lg transition-all duration-150 shadow-sm hover:shadow-sky-500/30 hover:shadow-md">
-                        Sign up
-                    </a>
+                    <a href="{% url 'signin' %}" class="bg-sky-500 hover:bg-sky-600 active:scale-95 active:bg-sky-700 text-white font-semibold px-4 py-1.5 rounded-lg transition-all duration-150 shadow-sm hover:shadow-sky-500/30 hover:shadow-md">Sign in</a>
                 {% endif %}
             </div>
         </div>
