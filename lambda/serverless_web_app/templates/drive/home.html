@@ -4,6 +4,14 @@
 {# Hide the entire navbar on the drive page branding lives in the sidebar #}
 {% block navbar %}{% endblock %}
 
+{# Hide footer — drive is a full-screen app #}
+{% block footer %}{% endblock %}
+
+{# Lock the body to viewport height so overflow-y-auto on inner panels fires correctly #}
+{% block extra_head %}
+<style>body { height: 100vh; overflow: hidden; }</style>
+{% endblock %}
+
 {# Full-bleed layout sidebar + main content side by side #}
 {% block main_class %}flex-1 flex overflow-hidden{% endblock %}
 
