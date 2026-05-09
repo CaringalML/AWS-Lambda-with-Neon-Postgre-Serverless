@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Sign in - NovaDrive{% endblock %}
+{% block title %}Admin Login - NovaDrive{% endblock %}
 
 {% block content %}
 <div class="w-full max-w-md">
 
     <div class="text-center mb-8">
-        <h1 class="text-3xl font-bold">Welcome back</h1>
+        <h1 class="text-3xl font-bold">Admin Login</h1>
     </div>
 
     <div class="bg-slate-800 border border-slate-700 rounded-xl p-8">
@@ -30,7 +30,7 @@
 
             <button type="submit" class="btn-primary mt-2" :disabled="loading">
                 <span class="spinner" x-show="loading" x-cloak></span>
-                <span x-text="loading ? 'Signing in…' : 'Sign in'">Sign in</span>
+                <span x-text="loading ? 'Logging in…' : 'Log in'">Log in</span>
             </button>
         </form>
     </div>
