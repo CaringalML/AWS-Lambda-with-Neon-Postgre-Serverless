@@ -1,4 +1,0 @@
-# Copy this file to terraform.tfvars and fill in your actual values.
-# Never commit terraform.tfvars — it contains secrets.
-
-database_url = "postgresql://<user>:<password>@<host>.ap-southeast-2.aws.neon.tech/<dbname>?sslmode=require&channel_binding=require"
