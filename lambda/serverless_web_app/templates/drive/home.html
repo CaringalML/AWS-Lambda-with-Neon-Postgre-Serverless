@@ -81,7 +81,15 @@ document.addEventListener('alpine:init', () => {
         _zipPollers: {},
         startZipPoll(jobId, folderName, toastId) {
             if (this._zipPollers[jobId]) return;
+            let polls = 0;
+            const MAX_POLLS = 200; // 200 × 3s = 10 min hard cap
             const timer = setInterval(async () => {
+                if (++polls > MAX_POLLS) {
+                    clearInterval(timer);
+                    delete this._zipPollers[jobId];
+                    this._failProgressToast(jobId, folderName);
+                    return;
+                }
                 try {
                     const r = await fetch(`/drive/job/${jobId}/status/`);
                     const data = await r.json();
