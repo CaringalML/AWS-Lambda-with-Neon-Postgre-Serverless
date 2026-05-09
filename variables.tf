@@ -33,3 +33,15 @@ variable "resend_api_key" {
   type        = string
   sensitive   = true
 }
+
+variable "cognito_admin_email" {
+  description = "Email address for the single admin account"
+  type        = string
+  default     = "lawrencecaringal5@gmail.com"
+}
+
+variable "cognito_admin_password" {
+  description = "Password for the single admin account"
+  type        = string
+  sensitive   = true
+}

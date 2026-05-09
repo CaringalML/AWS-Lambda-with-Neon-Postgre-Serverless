@@ -7,9 +7,6 @@
 
     <div class="text-center mb-8">
         <h1 class="text-3xl font-bold">Welcome back</h1>
-        <p class="text-slate-400 mt-2">No account?
-            <a href="{% url 'signup' %}" class="text-sky-400 hover:underline">Sign up</a>
-        </p>
     </div>
 
     <div class="bg-slate-800 border border-slate-700 rounded-xl p-8">
@@ -29,9 +26,6 @@
             <div>
                 <label class="block text-sm text-slate-400 mb-1">Password</label>
                 {{ form.password }}
-                <div class="text-right mt-1">
-                    <a href="{% url 'forgot_password' %}" class="text-sky-400 hover:underline text-xs">Forgot password?</a>
-                </div>
             </div>
 
             <button type="submit" class="btn-primary mt-2" :disabled="loading">

@@ -21,9 +21,9 @@ resource "aws_lambda_function" "serverless_web_app" {
       DJANGO_SETTINGS_MODULE = "config.settings.prod"
       # DB credentials fetched from SSM at runtime — not stored as plain text here
       SSM_DATABASE_URL_NAME  = aws_ssm_parameter.database_url.name
-      # Cognito — IDs are not secrets, but the actual auth is enforced by Cognito itself
-      COGNITO_USER_POOL_ID   = aws_cognito_user_pool.main.id
-      COGNITO_CLIENT_ID      = aws_cognito_user_pool_client.main.id
+      # Single-admin auth
+      ADMIN_EMAIL    = var.cognito_admin_email
+      ADMIN_PASSWORD = var.cognito_admin_password
       # NovaDrive
       DRIVE_BUCKET_NAME               = aws_s3_bucket.drive.bucket
       CLOUDFRONT_DOMAIN               = aws_cloudfront_distribution.drive.domain_name
