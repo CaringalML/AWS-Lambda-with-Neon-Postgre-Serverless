@@ -1,4 +1,3 @@
-import hashlib
 import hmac
 from datetime import timedelta
 
@@ -38,11 +37,9 @@ def signin(request):
         email_ok = hmac.compare_digest(email.lower(), settings.ADMIN_EMAIL.lower())
         pass_ok  = hmac.compare_digest(password, _get_admin_password())
         if email_ok and pass_ok:
-            email_hash = hashlib.md5(settings.ADMIN_EMAIL.lower().strip().encode()).hexdigest()
             request.session["access_token"] = "admin"
             request.session["user_sub"]     = "admin"
             request.session["user_email"]   = settings.ADMIN_EMAIL
-            request.session["avatar_url"]   = f"https://www.gravatar.com/avatar/{email_hash}?s=128&d=404"
             return redirect("drive_home")
         form.add_error(None, "Invalid email or password.")
     return render(request, "accounts/signin.html", {"form": form})

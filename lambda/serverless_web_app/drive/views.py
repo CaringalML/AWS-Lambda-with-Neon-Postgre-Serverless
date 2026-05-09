@@ -153,14 +153,7 @@ def _storage_stats(owner_sub):
 
 @cognito_login_required
 def drive_home(request, folder_pk=None):
-    import hashlib
     owner_sub = _get_owner_sub(request)
-
-    if not request.session.get("avatar_url"):
-        email = request.session.get("user_email", "")
-        h = hashlib.md5(email.lower().strip().encode()).hexdigest()
-        request.session["avatar_url"] = f"https://www.gravatar.com/avatar/{h}?s=128&d=404"
-
     current_folder = None
     breadcrumbs = []
     if folder_pk:
