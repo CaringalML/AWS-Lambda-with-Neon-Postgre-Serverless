@@ -16,13 +16,12 @@ terraform {
     }
   }
 
-  # State is stored in a dedicated bucket that is NOT managed by this Terraform config.
-  # The bucket and DynamoDB table are bootstrapped by the deploy workflow before terraform init.
+  # State bucket and lock table are pre-created manually (not managed by this Terraform config).
   backend "s3" {
-    bucket         = "serverless-web-app-drive-dev"
+    bucket         = "nova-drive-terraform-state"
     key            = "terraform/terraform.tfstate"
-    region         = "ap-southeast-2"
-    dynamodb_table = "terraform-state-lock"
+    region         = "us-east-1"
+    dynamodb_table = "novadrive-terraform-lock"
     encrypt        = true
   }
 }

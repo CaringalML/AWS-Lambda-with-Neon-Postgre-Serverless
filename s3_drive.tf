@@ -1,5 +1,5 @@
 resource "aws_s3_bucket" "drive" {
-  bucket = "${var.lambda_function_name}-drive-${var.environment}"
+  bucket = "nova-drive-caringal"
 
   tags = {
     Environment = var.environment
@@ -69,23 +69,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "drive" {
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
-    }
-  }
-
-  # Terraform state lives at terraform/terraform.tfstate. The versioned bucket creates a
-  # new noncurrent version on every deploy; prune those after 30 days to avoid accumulation.
-  # GLACIER_IR (Instant Retrieval) still allows immediate access, so the auto-tiering rule
-  # above is fine for the current version of the state file.
-  rule {
-    id     = "terraform-state-retention"
-    status = "Enabled"
-
-    filter {
-      prefix = "terraform/"
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = 30
     }
   }
 
