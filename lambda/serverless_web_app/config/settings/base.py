@@ -75,9 +75,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # AWS
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 
-# Single-admin auth (replaces Cognito)
+# Single-admin auth
 ADMIN_EMAIL             = os.environ.get("ADMIN_EMAIL", "")
 SSM_ADMIN_PASSWORD_NAME = os.environ.get("SSM_ADMIN_PASSWORD_NAME", "")
+COGNITO_CLIENT_ID       = os.environ.get("COGNITO_CLIENT_ID", "")
 
 # NovaDrive
 DRIVE_BUCKET_NAME               = os.environ.get("DRIVE_BUCKET_NAME", "")
