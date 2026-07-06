@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token }}">
     <title>{% block title %}NovaDrive{% endblock %}</title>
-    <link rel="icon" type="image/x-icon" href="https://d2xxgikten2tv4.cloudfront.net/static/img/novadrive.ico?v=2" sizes="any">
-    <link rel="icon" type="image/png" href="https://d2xxgikten2tv4.cloudfront.net/static/img/novadrive.png?v=2">
-    <link rel="apple-touch-icon" href="https://d2xxgikten2tv4.cloudfront.net/static/img/novadrive.png?v=2">
+    <link rel="icon" type="image/x-icon" href="https://{{ CLOUDFRONT_DOMAIN }}/static/img/novadrivelogo.ico" sizes="any">
+    <link rel="icon" type="image/png" href="https://{{ CLOUDFRONT_DOMAIN }}/static/img/novadrivelogo.png">
+    <link rel="apple-touch-icon" href="https://{{ CLOUDFRONT_DOMAIN }}/static/img/novadrivelogo.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
@@ -107,7 +107,7 @@
     <nav class="bg-[#13151c] border-b border-zinc-800 px-6 py-4">
         <div class="max-w-3xl mx-auto flex items-center justify-between">
             <a href="{% url 'drive_home' %}" class="flex items-center gap-2.5 group">
-                <img src="https://d2xxgikten2tv4.cloudfront.net/static/img/novadrive.png" alt="NovaDrive" class="w-8 h-8 object-contain shrink-0">
+                <img src="https://{{ CLOUDFRONT_DOMAIN }}/static/img/novadrivelogo.png" alt="NovaDrive" class="w-8 h-8 object-contain shrink-0">
                 <span class="text-base font-bold tracking-tight text-white">Nova<span class="text-sky-400">Drive</span></span>
             </a>
             <div class="flex items-center gap-4 text-sm">

@@ -119,3 +119,19 @@ resource "aws_s3_bucket_policy" "drive" {
 
   depends_on = [aws_cloudfront_distribution.drive]
 }
+
+resource "aws_s3_object" "logo_ico" {
+  bucket       = aws_s3_bucket.drive.bucket
+  key          = "static/img/novadrivelogo.ico"
+  source       = "${path.module}/documentation images/novadrivelogo.ico"
+  content_type = "image/x-icon"
+  etag         = filemd5("${path.module}/documentation images/novadrivelogo.ico")
+}
+
+resource "aws_s3_object" "logo_png" {
+  bucket       = aws_s3_bucket.drive.bucket
+  key          = "static/img/novadrivelogo.png"
+  source       = "${path.module}/documentation images/novadrivelogo.png"
+  content_type = "image/png"
+  etag         = filemd5("${path.module}/documentation images/novadrivelogo.png")
+}
