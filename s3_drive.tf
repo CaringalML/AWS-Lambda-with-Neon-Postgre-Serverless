@@ -27,13 +27,6 @@ resource "aws_s3_bucket_cors_configuration" "drive" {
   }
 }
 
-resource "aws_s3_bucket_versioning" "drive" {
-  bucket = aws_s3_bucket.drive.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
 # Lifecycle: transitions only — deletion by lifecycle cycle is explicitly prohibited.
 # NEVER add an expiration{} or noncurrent_version_expiration{} block here.
 # Files are only deleted by explicit user action through the app (drive_delete view).
