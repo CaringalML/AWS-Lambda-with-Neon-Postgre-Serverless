@@ -1,4 +1,4 @@
-# ACM certificate — must be in the SAME region as API Gateway (ap-southeast-2)
+# ACM certificate — must be in the SAME region as API Gateway (us-east-1)
 resource "aws_acm_certificate" "main" {
   domain_name       = var.custom_domain
   validation_method = "DNS"
