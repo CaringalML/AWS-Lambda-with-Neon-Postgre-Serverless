@@ -71,7 +71,10 @@ def forgot_password(request):
             reset_url = request.build_absolute_uri(
                 reverse("reset_password", kwargs={"token": str(token.token)})
             )
-            _send_reset_email(settings.ADMIN_EMAIL, reset_url)
+            try:
+                _send_reset_email(settings.ADMIN_EMAIL, reset_url)
+            except Exception:
+                pass
         return render(request, "accounts/forgot_password.html", {"sent": True})
     return render(request, "accounts/forgot_password.html", {"sent": False})
 
