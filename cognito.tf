@@ -66,7 +66,7 @@ resource "aws_cognito_user_pool" "main" {
                 <tr>
                   <td align="center" style="padding-top:28px;">
                     <p style="margin:0;color:#475569;font-size:12px;">
-                      Powered by Django &amp; AWS Lambda &nbsp;·&nbsp; Sydney, Australia
+                      Powered by Django &amp; AWS Lambda
                     </p>
                   </td>
                 </tr>
@@ -106,5 +106,23 @@ resource "aws_cognito_user_pool_client" "main" {
     access_token  = "hours"
     id_token      = "hours"
     refresh_token = "days"
+  }
+}
+
+resource "aws_cognito_user" "admin" {
+  user_pool_id = aws_cognito_user_pool.main.id
+  username     = var.cognito_admin_email
+
+  password = var.cognito_admin_password
+
+  attributes = {
+    email          = var.cognito_admin_email
+    email_verified = "true"
+  }
+
+  message_action = "SUPPRESS"
+
+  lifecycle {
+    ignore_changes = [password]
   }
 }
