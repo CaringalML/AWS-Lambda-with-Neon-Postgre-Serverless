@@ -16,12 +16,12 @@ terraform {
     }
   }
 
-  # Remote state is stored inside the drive bucket under the terraform/ prefix.
-  # The DynamoDB lock table is still used for safe concurrent access.
+  # State is stored in a dedicated bucket that is NOT managed by this Terraform config.
+  # The bucket and DynamoDB table are bootstrapped by the deploy workflow before terraform init.
   backend "s3" {
     bucket         = "serverless-web-app-drive-dev"
     key            = "terraform/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "ap-southeast-2"
     dynamodb_table = "terraform-state-lock"
     encrypt        = true
   }
