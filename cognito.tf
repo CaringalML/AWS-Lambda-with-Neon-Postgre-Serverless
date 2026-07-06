@@ -13,7 +13,7 @@ resource "aws_cognito_user_pool" "main" {
 
   verification_message_template {
     default_email_option = "CONFIRM_WITH_CODE"
-    email_subject        = "Your verification code — Serverless Web App"
+    email_subject        = "Your verification code — NovaDrive"
     email_message        = <<-HTML
       <!DOCTYPE html>
       <html lang="en">
@@ -31,7 +31,7 @@ resource "aws_cognito_user_pool" "main" {
                 <tr>
                   <td align="center" style="padding-bottom:32px;">
                     <span style="color:#38bdf8;font-size:22px;font-weight:700;letter-spacing:0.5px;">
-                      Serverless Web App
+                      NovaDrive
                     </span>
                   </td>
                 </tr>

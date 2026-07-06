@@ -778,7 +778,7 @@ document.addEventListener('alpine:init', () => {
         {# ── Brand header ── #}
         <div class="px-5 py-5 border-b border-zinc-800/80">
             <a href="{% url 'drive_home' %}" class="flex items-center gap-3">
-                <img src="https://d2xxgikten2tv4.cloudfront.net/static/img/novadrive.png" alt="NovaDrive" class="w-9 h-9 object-contain shrink-0">
+                <img src="https://{{ CLOUDFRONT_DOMAIN }}/static/img/novadrivelogo.png" alt="NovaDrive" class="w-9 h-9 object-contain shrink-0">
                 <div>
                     <p class="text-base font-bold leading-none tracking-tight text-white">Nova<span class="text-sky-400">Drive</span></p>
                     <p class="text-[10px] text-zinc-500 mt-0.5 tracking-wide uppercase">Cloud Storage</p>
