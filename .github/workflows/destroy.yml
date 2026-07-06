@@ -1,4 +1,4 @@
-name: Destroy Infrastructure
+name: Destroy
 
 env:
   TARGET_BRANCH: v3-novadrive
