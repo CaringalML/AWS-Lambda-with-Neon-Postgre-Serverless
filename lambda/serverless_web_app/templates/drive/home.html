@@ -232,8 +232,8 @@ document.addEventListener('alpine:init', () => {
             }
         },
         selectAll() {
-            const filePks   = [...document.querySelectorAll('[data-file-pk]')].map(el => parseInt(el.dataset.filePk));
-            const folderPks = [...document.querySelectorAll('[data-folder-pk]')].map(el => parseInt(el.dataset.folderPk));
+            const filePks   = [...document.querySelectorAll('[data-file-pk]')].map(el => el.dataset.filePk);
+            const folderPks = [...document.querySelectorAll('[data-folder-pk]')].map(el => el.dataset.folderPk);
             const totalSelected = this.selected.length + this.selectedFolders.length;
             const totalAll      = filePks.length + folderPks.length;
             if (totalSelected === totalAll) {
@@ -296,8 +296,8 @@ document.addEventListener('alpine:init', () => {
             const items = document.querySelectorAll('[data-file-pk]');
             this._previewList = Array.from(items)
                 .filter(el => { const ct = el.dataset.contentType || ''; return ct.startsWith('image/') || ct.startsWith('video/'); })
-                .map(el => parseInt(el.dataset.filePk));
-            this._previewIdx = this._previewList.indexOf(parseInt(pk));
+                .map(el => el.dataset.filePk);
+            this._previewIdx = this._previewList.indexOf(pk);
             await this._loadPreview(pk);
         },
         async _loadPreview(pk) {
