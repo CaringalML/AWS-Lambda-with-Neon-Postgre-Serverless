@@ -3,8 +3,10 @@ from . import views
 
 urlpatterns = [
     path("",                                views.drive_home,              name="drive_home"),
-    path("folder/<str:folder_pk>/",         views.drive_home,              name="drive_folder"),
+    # Literal routes must precede the <str:folder_pk> wildcard — unlike the old
+    # <int:> converter, <str:> matches "create" and would shadow it.
     path("folder/create/",                  views.create_folder,           name="drive_create_folder"),
+    path("folder/<str:folder_pk>/",         views.drive_home,              name="drive_folder"),
     path("folder/<str:pk>/delete/",         views.delete_folder,           name="drive_delete_folder"),
     path("folder/<str:pk>/rename/",         views.rename_folder,           name="drive_rename_folder"),
     path("file/<str:pk>/rename/",           views.rename_file,             name="drive_rename_file"),
