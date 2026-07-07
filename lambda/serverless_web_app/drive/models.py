@@ -6,9 +6,12 @@ from dataclasses import dataclass, field
 def _parse_dt(s) -> datetime.datetime | None:
     if not s:
         return None
-    if isinstance(s, datetime.datetime):
-        return s
-    return datetime.datetime.fromisoformat(s)
+    dt = s if isinstance(s, datetime.datetime) else datetime.datetime.fromisoformat(s)
+    # Treat naive timestamps as UTC — mixing naive and aware datetimes in
+    # sorts/comparisons raises TypeError and would 500 the timeline view.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
 
 class _ListProxy:

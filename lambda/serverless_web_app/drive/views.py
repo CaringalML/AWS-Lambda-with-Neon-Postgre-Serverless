@@ -3,7 +3,6 @@ import itertools
 import json
 import logging
 import os
-import uuid
 from urllib.parse import quote
 
 import resend
@@ -21,7 +20,7 @@ from django.shortcuts import render, redirect
 from django.views.decorators.http import require_POST
 
 from accounts.decorators import cognito_login_required
-from .models import DriveFile, DriveFolder, BatchJob, _ListProxy
+from .models import DriveFile, BatchJob, _ListProxy
 from . import dal
 
 logger = logging.getLogger(__name__)
@@ -41,9 +40,10 @@ _STORAGE_CAP_BYTES = 15 * 1024 ** 3  # 15 GB display cap
 def _parse_dt(s):
     if not s:
         return None
-    if isinstance(s, datetime.datetime):
-        return s
-    return datetime.datetime.fromisoformat(s)
+    dt = s if isinstance(s, datetime.datetime) else datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
 
 def _get_folder_path(folder_id, owner_sub):
@@ -426,6 +426,8 @@ def confirm_upload(request):
         if cap_str := data.get("captured_at"):
             try:
                 captured_at = datetime.datetime.fromisoformat(cap_str.replace("Z", "+00:00"))
+                if captured_at.tzinfo is None:
+                    captured_at = captured_at.replace(tzinfo=datetime.timezone.utc)
             except (ValueError, AttributeError):
                 pass
 
@@ -984,62 +986,6 @@ def _send_archive_email(to_email, file_names):
 # ---------------------------------------------------------------------------
 # Batch zip-folder download
 # ---------------------------------------------------------------------------
-
-INLINE_ZIP_THRESHOLD = 0  # Always use Batch — Lambda timeout too short for inline zipping
-
-
-def _collect_folder_files(folder_pk, owner_sub):
-    result = []
-    queue = [(folder_pk, "")]
-    visited = set()
-    while queue:
-        fk, prefix = queue.pop(0)
-        if fk in visited:
-            continue
-        visited.add(fk)
-        for sf in dal.list_subfolders(owner_sub, fk, active_only=True):
-            child_prefix = f"{prefix}/{sf.name}" if prefix else sf.name
-            queue.append((sf.folder_id, child_prefix))
-        for f in dal.list_files_in_folder(fk, active_only=True):
-            if f.owner_sub == owner_sub and f.storage_class == DriveFile.GLACIER_IR:
-                arc_path = f"{prefix}/{f.name}" if prefix else f.name
-                result.append((f, arc_path))
-    return result
-
-
-def _folder_total_size(folder_pk, owner_sub):
-    queue = [folder_pk]
-    visited = set()
-    total = 0
-    while queue:
-        fk = queue.pop()
-        if fk in visited:
-            continue
-        visited.add(fk)
-        for sf in dal.list_subfolders(owner_sub, fk, active_only=True):
-            queue.append(sf.folder_id)
-        for f in dal.list_files_in_folder(fk, active_only=True):
-            if f.owner_sub == owner_sub and f.storage_class == DriveFile.GLACIER_IR:
-                total += f.size
-    return total
-
-
-def _zip_and_upload(folder_pk, owner_sub, s3_client, bucket):
-    import io, zipfile
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for drv_file, arc_path in _collect_folder_files(folder_pk, owner_sub):
-            try:
-                obj = s3_client.get_object(Bucket=bucket, Key=drv_file.s3_key)
-                zf.writestr(arc_path, obj["Body"].read())
-            except Exception as e:
-                logger.warning("zip_skip key=%s err=%s", drv_file.s3_key, e)
-    buf.seek(0)
-    zip_key = f"temp-zips/{uuid.uuid4()}.zip"
-    s3_client.put_object(Bucket=bucket, Key=zip_key, Body=buf.getvalue(),
-                         ContentType="application/zip")
-    return zip_key
-
 
 @cognito_login_required
 @require_POST
