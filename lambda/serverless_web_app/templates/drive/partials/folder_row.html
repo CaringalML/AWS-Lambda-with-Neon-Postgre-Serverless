@@ -2,17 +2,17 @@
      data-folder-pk="{{ folder.pk }}"
      data-name="{{ folder.name|escapejs }}"
      class="bg-[#13151c] border rounded-xl transition-all duration-100 cursor-pointer select-none"
-     :class="isSelectedFolder({{ folder.pk }}) ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
-     @click.stop="rowClickFolder($event, {{ folder.pk }})"
+     :class="isSelectedFolder('{{ folder.pk }}') ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
+     @click.stop="rowClickFolder($event, '{{ folder.pk }}')"
      @dblclick.stop="window.location='{% url 'drive_folder' folder.pk %}'"
-     @contextmenu.stop="openCtxFolder($event, {{ folder.pk }}, $el.dataset.name, '{% url 'drive_folder' folder.pk %}')">
+     @contextmenu.stop="openCtxFolder($event, '{{ folder.pk }}', $el.dataset.name, '{% url 'drive_folder' folder.pk %}')">
 
     {# ── LIST view ── #}
     <div x-show="view === 'list'" class="flex items-center gap-4 px-5 py-3.5 pointer-events-none">
 
         <div class="w-4 h-4 shrink-0 flex items-center justify-center">
             <div class="w-3 h-3 rounded-full border-2 transition-all duration-100"
-                 :class="isSelectedFolder({{ folder.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
+                 :class="isSelectedFolder('{{ folder.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
         </div>
 
         <div class="shrink-0">
@@ -32,7 +32,7 @@
 
         <div class="flex items-start justify-between">
             <div class="w-3 h-3 rounded-full border-2 mt-0.5 transition-all duration-100"
-                 :class="isSelectedFolder({{ folder.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
+                 :class="isSelectedFolder('{{ folder.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
         </div>
 
         <div class="flex justify-center py-2">

@@ -3,15 +3,15 @@
      data-file-pk="{{ file.pk }}"
      data-content-type="{{ file.content_type }}"
      class="bg-[#13151c] border rounded-xl transition-all duration-100 cursor-pointer select-none overflow-hidden"
-     :class="isSelected({{ file.pk }}) ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
-     @click.stop="rowClick($event, {{ file.pk }})">
+     :class="isSelected('{{ file.pk }}') ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
+     @click.stop="rowClick($event, '{{ file.pk }}')">
 
     {# ── LIST view ── #}
     <div x-show="view === 'list'" class="flex items-center gap-4 px-5 py-3 pointer-events-none">
 
         <div class="w-4 h-4 shrink-0 flex items-center justify-center">
             <div class="w-3 h-3 rounded-full border-2 transition-all duration-100"
-                 :class="isSelected({{ file.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
+                 :class="isSelected('{{ file.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
         </div>
 
         {# Thumbnail for images/video, icon for everything else #}
@@ -94,7 +94,7 @@
         {# Selection dot #}
         <div class="absolute top-2 left-2 z-10">
             <div class="w-3 h-3 rounded-full border-2 transition-all duration-100 shadow"
-                 :class="isSelected({{ file.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-white/60 bg-black/30'"></div>
+                 :class="isSelected('{{ file.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-white/60 bg-black/30'"></div>
         </div>
 
         {# Days-left badge #}
@@ -153,7 +153,7 @@
 
         <div class="flex items-start justify-between">
             <div class="w-3 h-3 rounded-full border-2 mt-0.5 transition-all duration-100"
-                 :class="isSelected({{ file.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
+                 :class="isSelected('{{ file.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
             {% with days=file.days_until_permanent_delete %}
             {% if days <= 3 %}
             <span class="text-[10px] text-red-400 font-medium">{{ days }}d left</span>

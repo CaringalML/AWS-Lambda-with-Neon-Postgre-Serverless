@@ -8,7 +8,7 @@ Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer
 {# Determine if this folder is in the active breadcrumb path #}
 {% with is_open=current_folder.pk %}
 <div x-data="{
-    open: {% for crumb in breadcrumbs %}{{ crumb.pk }} === {{ folder.pk }} || {% endfor %}{{ current_folder.pk|default:0 }} === {{ folder.pk }}
+    open: {% for crumb in breadcrumbs %}'{{ crumb.pk }}' === '{{ folder.pk }}' || {% endfor %}'{{ current_folder.pk|default:"" }}' === '{{ folder.pk }}'
 }">
 
     {# Row #}
@@ -17,7 +17,7 @@ Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer
          style="padding-left: calc(0.75rem + {{ depth|default:0 }} * 0.875rem);">
 
         {# Chevron — only if has children, else spacer #}
-        {% if children.count %}
+        {% if children %}
         <button type="button" @click.prevent="open = !open"
                 class="shrink-0 w-4 h-4 flex items-center justify-center text-zinc-600 hover:text-zinc-300 mr-1">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5 transition-transform duration-150"
@@ -42,7 +42,7 @@ Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer
     </div>
 
     {# Children — only rendered when folder actually has children #}
-    {% if children.count %}
+    {% if children %}
     <div x-show="open" style="display:none">
         {% with next_depth=depth|add:1 %}
         {% for child in children %}

@@ -547,7 +547,7 @@ document.addEventListener('alpine:init', () => {
 
         async uploadFiles(files) {
             this.uploading = true;
-            const folderPk = {{ current_folder.pk|default:'null' }};
+            const folderPk = {% if current_folder %}'{{ current_folder.pk }}'{% else %}null{% endif %};
             const tasks = files.map(file => () => {
                 const toastId = this._addUploadToast(file.name);
                 return this._uploadOne(file, folderPk, toastId);
@@ -567,7 +567,7 @@ document.addEventListener('alpine:init', () => {
             // folderPkMap: relative path string → db pk
             // e.g. "myFolder" → 5, "myFolder/sub" → 7
             const folderPkMap = {};
-            const rootParentPk = {{ current_folder.pk|default:'null' }};
+            const rootParentPk = {% if current_folder %}'{{ current_folder.pk }}'{% else %}null{% endif %};
 
             try {
                 // Collect all unique folder paths, sorted shallow → deep
@@ -716,7 +716,7 @@ document.addEventListener('alpine:init', () => {
                 const resp = await fetch('{% url "drive_create_folder" %}', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-CSRFToken': this.csrf() },
-                    body: JSON.stringify({ name, parent_pk: {{ current_folder.pk|default:'null' }} }),
+                    body: JSON.stringify({ name, parent_pk: {% if current_folder %}'{{ current_folder.pk }}'{% else %}null{% endif %} }),
                 });
                 const data = await resp.json();
                 if (data.error) { alert(data.error); return; }

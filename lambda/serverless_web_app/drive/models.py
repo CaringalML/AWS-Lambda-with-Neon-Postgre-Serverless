@@ -28,6 +28,10 @@ class _ListProxy:
     def __bool__(self):
         return bool(self._items)
 
+    @property
+    def count(self):
+        return len(self._items)
+
 
 @dataclass
 class DriveFolder:

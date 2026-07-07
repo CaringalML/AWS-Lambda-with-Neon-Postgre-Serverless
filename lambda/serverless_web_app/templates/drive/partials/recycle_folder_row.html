@@ -4,14 +4,14 @@
      data-file-count="{{ folder.file_count }}"
      data-subfolder-count="{{ folder.subfolder_count }}"
      class="bg-[#13151c] border rounded-xl transition-all duration-100 cursor-pointer select-none"
-     :class="isSelectedFolder({{ folder.pk }}) ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
-     @click.stop="rowClickBinFolder($event, {{ folder.pk }})">
+     :class="isSelectedFolder('{{ folder.pk }}') ? 'border-sky-500 bg-sky-500/5' : 'border-zinc-700/60 hover:border-zinc-500/60'"
+     @click.stop="rowClickBinFolder($event, '{{ folder.pk }}')">
 
     {# LIST view #}
     <div x-show="view === 'list'" class="flex items-center gap-4 px-5 py-3.5 pointer-events-none">
         <div class="w-4 h-4 shrink-0 flex items-center justify-center">
             <div class="w-3 h-3 rounded-full border-2 transition-all duration-100"
-                 :class="isSelectedFolder({{ folder.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
+                 :class="isSelectedFolder('{{ folder.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
         </div>
         <div class="shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-yellow-400" fill="currentColor" viewBox="0 0 24 24">
@@ -42,7 +42,7 @@
     <div x-show="view === 'grid'" style="display:none" class="flex flex-col p-4 gap-3 pointer-events-none">
         <div class="flex items-start justify-between">
             <div class="w-3 h-3 rounded-full border-2 mt-0.5 transition-all duration-100"
-                 :class="isSelectedFolder({{ folder.pk }}) ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
+                 :class="isSelectedFolder('{{ folder.pk }}') ? 'bg-sky-500 border-sky-500' : 'border-zinc-600'"></div>
             {% with days=folder.days_until_permanent_delete %}
             {% if days <= 3 %}
             <span class="text-[10px] text-red-400 font-medium">{{ days }}d left</span>
