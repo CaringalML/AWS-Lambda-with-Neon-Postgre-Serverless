@@ -64,6 +64,9 @@ DYNAMODB_FOLDERS_TABLE    = os.environ.get("DYNAMODB_FOLDERS_TABLE", "")
 DYNAMODB_FILES_TABLE      = os.environ.get("DYNAMODB_FILES_TABLE", "")
 DYNAMODB_BATCH_JOBS_TABLE = os.environ.get("DYNAMODB_BATCH_JOBS_TABLE", "")
 
+# Thumbnail generator Lambda (async backfill invokes)
+THUMBNAILER_FUNCTION = os.environ.get("THUMBNAILER_FUNCTION", "")
+
 # AWS Batch (folder zip downloads)
 BATCH_JOB_QUEUE      = os.environ.get("BATCH_JOB_QUEUE", "")
 BATCH_JOB_DEFINITION = os.environ.get("BATCH_JOB_DEFINITION", "")

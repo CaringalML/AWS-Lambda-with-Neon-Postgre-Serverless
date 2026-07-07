@@ -118,6 +118,24 @@ resource "aws_iam_role_policy" "lambda_ssm_resend_key" {
   })
 }
 
+# Allow the web app Lambda to async-invoke the thumbnailer (backfill for
+# files uploaded before thumbnails existed)
+resource "aws_iam_role_policy" "lambda_invoke_thumbnailer" {
+  name = "${var.lambda_function_name}-${var.environment}-invoke-thumbnailer-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = aws_lambda_function.thumbnailer.arn
+      }
+    ]
+  })
+}
+
 # Allow Lambda to submit and describe AWS Batch jobs
 resource "aws_iam_role_policy" "lambda_batch" {
   name = "${var.lambda_function_name}-${var.environment}-batch-policy"

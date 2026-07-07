@@ -3,7 +3,7 @@ import itertools
 import json
 import logging
 import os
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 import resend
 
@@ -196,6 +196,26 @@ def _delete_object_and_thumb(s3, s3_key):
             s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=key)
         except ClientError:
             pass
+
+
+def _request_thumbnail(s3_key):
+    """Fire-and-forget invoke of the thumbnailer Lambda with a synthetic S3
+    event — used to backfill files uploaded before thumbnails existed."""
+    fn = settings.THUMBNAILER_FUNCTION
+    if not fn:
+        return
+    try:
+        boto3.client("lambda", region_name=settings.AWS_REGION).invoke(
+            FunctionName=fn,
+            InvocationType="Event",
+            Payload=json.dumps({"Records": [{"s3": {
+                "bucket": {"name": settings.DRIVE_BUCKET_NAME},
+                # thumbnailer unquote_plus()es keys like real S3 events
+                "object": {"key": quote_plus(s3_key)},
+            }}]}).encode(),
+        )
+    except Exception as e:
+        logger.warning("thumbnail backfill request failed for %s: %s", s3_key, e)
 
 
 def _require_folder(folder_id, owner_sub):
@@ -539,10 +559,23 @@ def view_file(request, pk):
 @cognito_login_required
 def file_thumbnail(request, pk):
     file = _require_file(pk, _get_owner_sub(request))
+    max_age = 3600
     if file.content_type.startswith("image/"):
         # Pre-generated WebP thumb in STANDARD class — tiny, cheap, and
         # servable even while the original sits in Deep Archive.
-        signed_url = _get_cloudfront_signed_url(_thumb_key(file.s3_key), expires_seconds=3600)
+        thumb = _thumb_key(file.s3_key)
+        try:
+            _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=thumb)
+            signed_url = _get_cloudfront_signed_url(thumb, expires_seconds=3600)
+        except ClientError:
+            # No thumb yet (uploaded before the thumbnailer existed, or
+            # generation still in flight) — queue one and serve the
+            # original this time so the tile isn't blank.
+            _request_thumbnail(file.s3_key)
+            if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
+                return HttpResponse(status=404)
+            signed_url = _get_cloudfront_signed_url(file.s3_key, expires_seconds=3600)
+            max_age = 60  # re-check soon so the fresh thumb gets picked up
     elif file.content_type.startswith("video/"):
         if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
             return HttpResponse(status=404)
@@ -550,7 +583,7 @@ def file_thumbnail(request, pk):
     else:
         return HttpResponse(status=404)
     response = redirect(signed_url)
-    response["Cache-Control"] = "private, max-age=3600"
+    response["Cache-Control"] = f"private, max-age={max_age}"
     return response
 
 
