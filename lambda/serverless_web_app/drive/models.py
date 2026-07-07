@@ -35,9 +35,6 @@ class _ListProxy:
 
 @dataclass
 class DriveFolder:
-    GLACIER_IR   = "GLACIER_IR"
-    DEEP_ARCHIVE = "DEEP_ARCHIVE"
-
     folder_id:  str
     owner_sub:  str
     name:       str

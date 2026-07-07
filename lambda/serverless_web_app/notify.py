@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote_plus
 
 import boto3
+from boto3.dynamodb.conditions import Key
 import resend
 
 
@@ -36,7 +37,7 @@ def _handle_restore_completed(s3_key):
 
     resp  = table.query(
         IndexName="s3key-index",
-        KeyConditionExpression=boto3.dynamodb.conditions.Key("s3_key").eq(s3_key),
+        KeyConditionExpression=Key("s3_key").eq(s3_key),
         Limit=1,
     )
     items = resp.get("Items", [])

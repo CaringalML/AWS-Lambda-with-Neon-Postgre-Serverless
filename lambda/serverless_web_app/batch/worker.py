@@ -68,7 +68,6 @@ def _collect_files(folder_id, owner_sub):
 
 def run_zip_folder(folder_ids, owner_sub, job_db_id):
     from drive import dal
-    from drive.models import BatchJob
 
     folders = [dal.get_folder(fid) for fid in folder_ids]
     folders = [f for f in folders if f and f.owner_sub == owner_sub]
@@ -126,7 +125,6 @@ def main():
     _setup_django()
 
     from drive import dal
-    from drive.models import BatchJob
     dal.set_batch_job_running(job_db_id)
 
     try:

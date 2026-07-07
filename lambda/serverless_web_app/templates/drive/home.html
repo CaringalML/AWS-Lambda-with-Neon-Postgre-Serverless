@@ -1221,7 +1221,7 @@ document.addEventListener('alpine:init', () => {
                              data-file-pk="{{ file.pk }}"
                              data-content-type="{{ file.content_type }}"
                              data-name="{{ file.name|escapejs }}"
-                             @click="openPreview({{ file.pk }})">
+                             @click="openPreview('{{ file.pk }}')">
                             {% if file.content_type|slice:":6" == "video/" %}
                             <video src="{% url 'drive_thumb' file.pk %}"
                                    class="w-full h-full object-cover"

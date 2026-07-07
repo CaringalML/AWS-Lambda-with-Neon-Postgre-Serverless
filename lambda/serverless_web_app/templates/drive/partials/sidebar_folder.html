@@ -3,10 +3,6 @@ Recursive VSCode-style collapsible folder tree node.
 Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer)
 {% endcomment %}
 {% with children=folder.subfolders.all %}
-{% with is_active=current_folder.pk|stringformat:"s" in_crumbs=breadcrumbs %}
-
-{# Determine if this folder is in the active breadcrumb path #}
-{% with is_open=current_folder.pk %}
 <div x-data="{
     open: {% for crumb in breadcrumbs %}'{{ crumb.pk }}' === '{{ folder.pk }}' || {% endfor %}'{{ current_folder.pk|default:"" }}' === '{{ folder.pk }}'
 }">
@@ -55,6 +51,4 @@ Variables passed in: folder, current_folder, breadcrumbs, depth (0-based integer
     {% endif %}
 
 </div>
-{% endwith %}
-{% endwith %}
 {% endwith %}
