@@ -27,30 +27,16 @@ resource "aws_s3_bucket_cors_configuration" "drive" {
   }
 }
 
-# Lifecycle: transitions only — deletion by lifecycle cycle is explicitly prohibited.
-# NEVER add an expiration{} or noncurrent_version_expiration{} block here.
+# Lifecycle: deletion by lifecycle is explicitly prohibited for user files.
+# NEVER add an expiration{} block for user data here.
 # Files are only deleted by explicit user action through the app (drive_delete view).
+#
+# NOTE: the old blanket "auto-tiering" rule was removed — the app already sets
+# GLACIER_IR on user files at upload (confirm_upload), and blanket tiering
+# would push thumbs/ into Glacier, reintroducing retrieval fees on every
+# grid load. Thumbnails must stay in STANDARD.
 resource "aws_s3_bucket_lifecycle_configuration" "drive" {
   bucket = aws_s3_bucket.drive.id
-
-  # Transitions current versions through storage tiers to reduce cost.
-  # No expiration — objects are never automatically deleted.
-  rule {
-    id     = "auto-tiering"
-    status = "Enabled"
-
-    filter {}
-
-    transition {
-      days          = 30
-      storage_class = "STANDARD_IA"
-    }
-
-    transition {
-      days          = 90
-      storage_class = "GLACIER_IR"
-    }
-  }
 
   # Expire incomplete multipart uploads after 7 days to avoid orphaned storage charges.
   # This only removes partial uploads that were never completed — not actual files.
@@ -81,16 +67,27 @@ resource "aws_s3_bucket_lifecycle_configuration" "drive" {
   }
 }
 
-# Notify Lambda when a Glacier restore completes
+# S3 event notifications — one resource holds ALL notifications for the bucket
 resource "aws_s3_bucket_notification" "drive_restore_completed" {
   bucket = aws_s3_bucket.drive.id
 
+  # Glacier restore finished → email the user
   lambda_function {
     lambda_function_arn = aws_lambda_function.notify.arn
     events              = ["s3:ObjectRestore:Completed"]
   }
 
-  depends_on = [aws_lambda_permission.s3_invoke_notify]
+  # New object uploaded → generate WebP thumbnail
+  # (thumbnailer ignores thumbs/, temp-zips/, static/ so it can't recurse)
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.thumbnailer.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [
+    aws_lambda_permission.s3_invoke_notify,
+    aws_lambda_permission.s3_invoke_thumbnailer,
+  ]
 }
 
 # Only CloudFront (via OAC) can read objects — no direct S3 access

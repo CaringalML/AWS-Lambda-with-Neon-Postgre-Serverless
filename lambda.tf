@@ -86,3 +86,36 @@ resource "aws_lambda_permission" "s3_invoke_notify" {
   principal     = "s3.amazonaws.com"
   source_arn    = aws_s3_bucket.drive.arn
 }
+
+# ── Thumbnail generator Lambda ──────────────────────────────────────────────
+# Fired on every upload; writes a small WebP to thumbs/{key}.webp so the grid
+# never downloads full-size originals (or pays Glacier IR retrieval fees).
+resource "aws_cloudwatch_log_group" "thumbnailer_lambda" {
+  name              = "/aws/lambda/${var.lambda_function_name}-thumbnailer-${var.environment}"
+  retention_in_days = 7
+}
+
+resource "aws_lambda_function" "thumbnailer" {
+  filename         = data.archive_file.lambda_zip.output_path
+  function_name    = "${var.lambda_function_name}-thumbnailer-${var.environment}"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "thumbnailer.handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  timeout          = 60
+  memory_size      = 1024 # Pillow decode/resize of large photos
+
+  depends_on = [aws_cloudwatch_log_group.thumbnailer_lambda]
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_lambda_permission" "s3_invoke_thumbnailer" {
+  statement_id  = "AllowS3InvokeThumbnailer"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.thumbnailer.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.drive.arn
+}

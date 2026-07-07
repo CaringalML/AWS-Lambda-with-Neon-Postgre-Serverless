@@ -89,6 +89,12 @@ def _get_owner_sub(request):
     return request.session.get("user_sub", "")
 
 
+# Signed URLs expire on fixed 6-hour boundaries rather than N seconds from
+# "now" — otherwise every page load mints a different URL for the same object
+# and the browser cache can never be reused.
+_URL_EXPIRY_WINDOW = 6 * 3600
+
+
 def _get_cloudfront_signed_url(s3_key, expires_seconds=300):
     global _cf_private_key_cache
     if _cf_private_key_cache is None:
@@ -105,7 +111,9 @@ def _get_cloudfront_signed_url(s3_key, expires_seconds=300):
     cf_signer = CloudFrontSigner(settings.CLOUDFRONT_KEY_PAIR_ID, rsa_signer)
     encoded_key = quote(s3_key, safe="/")
     url = f"https://{settings.CLOUDFRONT_DOMAIN}/{encoded_key}"
-    expire_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=expires_seconds)
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    expire_epoch = (int(now + expires_seconds) // _URL_EXPIRY_WINDOW + 1) * _URL_EXPIRY_WINDOW
+    expire_at = datetime.datetime.fromtimestamp(expire_epoch, tz=datetime.timezone.utc)
     return cf_signer.generate_presigned_url(url, date_less_than=expire_at)
 
 
@@ -169,6 +177,25 @@ def _s3_move(s3, old_key, new_key):
         MetadataDirective="COPY",
     )
     s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=old_key)
+
+
+def _thumb_key(s3_key):
+    return f"thumbs/{s3_key}.webp"
+
+
+def _move_thumb(s3, old_key, new_key):
+    try:
+        _s3_move(s3, _thumb_key(old_key), _thumb_key(new_key))
+    except ClientError:
+        pass  # no thumb yet (non-image, or generation still in flight)
+
+
+def _delete_object_and_thumb(s3, s3_key):
+    for key in (s3_key, _thumb_key(s3_key)):
+        try:
+            s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=key)
+        except ClientError:
+            pass
 
 
 def _require_folder(folder_id, owner_sub):
@@ -326,6 +353,7 @@ def rename_folder(request, pk):
                         new_key = new_prefix + f.s3_key[len(old_prefix):]
                         try:
                             _s3_move(s3, f.s3_key, new_key)
+                            _move_thumb(s3, f.s3_key, new_key)
                             dal.update_file_s3key(f.file_id, new_key)
                         except ClientError as e:
                             logger.error("S3 move failed %s → %s: %s", f.s3_key, new_key, e)
@@ -357,8 +385,10 @@ def rename_file(request, pk):
         new_key = f"{directory}/{name}"
 
         if old_key != new_key:
+            s3 = _s3()
             try:
-                _s3_move(_s3(), old_key, new_key)
+                _s3_move(s3, old_key, new_key)
+                _move_thumb(s3, old_key, new_key)
             except ClientError as e:
                 logger.error("S3 move failed %s → %s: %s", old_key, new_key, e)
                 new_key = old_key  # keep old key if move failed
@@ -509,11 +539,16 @@ def view_file(request, pk):
 @cognito_login_required
 def file_thumbnail(request, pk):
     file = _require_file(pk, _get_owner_sub(request))
-    if not (file.content_type.startswith("image/") or file.content_type.startswith("video/")):
+    if file.content_type.startswith("image/"):
+        # Pre-generated WebP thumb in STANDARD class — tiny, cheap, and
+        # servable even while the original sits in Deep Archive.
+        signed_url = _get_cloudfront_signed_url(_thumb_key(file.s3_key), expires_seconds=3600)
+    elif file.content_type.startswith("video/"):
+        if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
+            return HttpResponse(status=404)
+        signed_url = _get_cloudfront_signed_url(file.s3_key, expires_seconds=3600)
+    else:
         return HttpResponse(status=404)
-    if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
-        return HttpResponse(status=404)
-    signed_url = _get_cloudfront_signed_url(file.s3_key, expires_seconds=3600)
     response = redirect(signed_url)
     response["Cache-Control"] = "private, max-age=3600"
     return response
@@ -617,10 +652,7 @@ def bulk_bin_delete(request):
     for fid in file_ids:
         f = dal.get_file(fid)
         if f and f.owner_sub == owner_sub and f.deleted_at:
-            try:
-                s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
-            except ClientError:
-                pass
+            _delete_object_and_thumb(s3, f.s3_key)
             dal.hard_delete_file(f.file_id)
             deleted_file_ids.append(f.file_id)
 
@@ -631,10 +663,7 @@ def bulk_bin_delete(request):
             continue
         for subfolder_id in _collect_folder_ids(folder, owner_sub):
             for f in dal.list_files_in_folder(subfolder_id, active_only=False):
-                try:
-                    s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
-                except ClientError:
-                    pass
+                _delete_object_and_thumb(s3, f.s3_key)
                 dal.hard_delete_file(f.file_id)
             dal.hard_delete_folder(subfolder_id)
         deleted_folder_ids.append(folder.folder_id)
@@ -649,10 +678,7 @@ def permanent_delete(request, pk):
     file = _require_file(pk, owner_sub)
     if not file.deleted_at:
         raise Http404
-    try:
-        _s3().delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=file.s3_key)
-    except ClientError:
-        pass
+    _delete_object_and_thumb(_s3(), file.s3_key)
     dal.hard_delete_file(file.file_id)
     return HttpResponse("")
 
@@ -668,10 +694,7 @@ def recycle_bin(request):
     all_files = dal.list_all_files(owner_sub)
     for f in all_files:
         if f.deleted_at and _parse_dt(f.deleted_at) < cutoff:
-            try:
-                s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
-            except ClientError:
-                pass
+            _delete_object_and_thumb(s3, f.s3_key)
             dal.hard_delete_file(f.file_id)
 
     # Auto-permanently-delete expired folders and their contents
@@ -680,10 +703,7 @@ def recycle_bin(request):
         if folder.deleted_at and _parse_dt(folder.deleted_at) < cutoff:
             for subfolder_id in _collect_folder_ids(folder, owner_sub):
                 for f in dal.list_files_in_folder(subfolder_id, active_only=False):
-                    try:
-                        s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
-                    except ClientError:
-                        pass
+                    _delete_object_and_thumb(s3, f.s3_key)
                     dal.hard_delete_file(f.file_id)
                 dal.hard_delete_folder(subfolder_id)
 
