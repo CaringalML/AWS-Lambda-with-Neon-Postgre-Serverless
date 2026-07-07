@@ -1,12 +1,15 @@
 """
-Lambda handler for S3 ObjectCreated events — generates WebP thumbnails.
+Lambda handler for S3 ObjectCreated events — generates WebP derivatives.
 
-When a file lands in the drive bucket, this creates a small WebP thumbnail
-at thumbs/{original_key}.webp (S3 STANDARD class) so the grid never has to
-download multi-MB originals — and never pays Glacier IR retrieval fees.
+When a file lands in the drive bucket, this creates:
+  thumbs/{key}.webp    ~400px  — grid/tile view
+  previews/{key}.webp  ~1600px — lightbox preview
+both in S3 STANDARD class, so the UI never downloads multi-MB originals —
+and never pays Glacier IR retrieval fees. Originals are only fetched on
+explicit download.
 
-Guards against self-triggering: writes to thumbs/ fire another ObjectCreated
-event, but the prefix check below returns immediately, so no recursion.
+Guards against self-triggering: writes to thumbs//previews/ fire another
+ObjectCreated event, but the prefix check below returns immediately.
 """
 import io
 import os
@@ -15,10 +18,13 @@ from urllib.parse import unquote_plus
 import boto3
 from PIL import Image, ImageOps
 
-MAX_DIM        = 400          # bounding box for thumbnails
-WEBP_QUALITY   = 80
-MAX_SOURCE_MB  = 80           # skip anything bigger — not worth thumbnailing
-SKIP_PREFIXES  = ("thumbs/", "temp-zips/", "static/")
+# (key prefix, bounding box, webp quality)
+DERIVATIVES = (
+    ("thumbs/", 400, 80),
+    ("previews/", 1600, 82),
+)
+MAX_SOURCE_MB = 80            # skip anything bigger — not worth processing
+SKIP_PREFIXES = ("thumbs/", "previews/", "temp-zips/", "static/")
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif")
 
@@ -29,7 +35,7 @@ def handler(event, context):
             _process(record)
         except Exception as e:
             # Log and continue — raising would make S3/Lambda retry and
-            # regenerate the same thumbnail up to 3 times.
+            # regenerate the same derivatives up to 3 times.
             key = record.get("s3", {}).get("object", {}).get("key", "?")
             print(f"[ERROR] thumbnailer failed for key={key}: {e}")
 
@@ -43,14 +49,18 @@ def _process(record):
 
     region = os.environ.get("AWS_REGION", "ap-southeast-2")
     s3 = boto3.client("s3", region_name=region)
-    thumb_key = f"thumbs/{key}.webp"
 
-    # Already generated (e.g. this is the GLACIER_IR copy event after upload)
-    try:
-        s3.head_object(Bucket=bucket, Key=thumb_key)
+    # Which derivatives are missing? (the GLACIER_IR copy event after upload,
+    # and backfill re-invokes, land here with everything already generated)
+    missing = []
+    for prefix, dim, quality in DERIVATIVES:
+        out_key = f"{prefix}{key}.webp"
+        try:
+            s3.head_object(Bucket=bucket, Key=out_key)
+        except s3.exceptions.ClientError:
+            missing.append((out_key, dim, quality))
+    if not missing:
         return
-    except s3.exceptions.ClientError:
-        pass
 
     head = s3.head_object(Bucket=bucket, Key=key)
     content_type = head.get("ContentType", "")
@@ -61,23 +71,23 @@ def _process(record):
 
     body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
 
-    img = Image.open(io.BytesIO(body))
-    img = ImageOps.exif_transpose(img)  # respect phone camera orientation
-    if img.mode in ("P", "PA", "LA"):
-        img = img.convert("RGBA")
-    elif img.mode not in ("RGB", "RGBA", "L"):
-        img = img.convert("RGB")
-    img.thumbnail((MAX_DIM, MAX_DIM))
+    base = Image.open(io.BytesIO(body))
+    base = ImageOps.exif_transpose(base)  # respect phone camera orientation
+    if base.mode in ("P", "PA", "LA"):
+        base = base.convert("RGBA")
+    elif base.mode not in ("RGB", "RGBA", "L"):
+        base = base.convert("RGB")
 
-    out = io.BytesIO()
-    img.save(out, format="WEBP", quality=WEBP_QUALITY, method=4)
-    out.seek(0)
-
-    s3.put_object(
-        Bucket=bucket,
-        Key=thumb_key,
-        Body=out.getvalue(),
-        ContentType="image/webp",
-        CacheControl="public, max-age=31536000, immutable",
-    )
-    print(f"[OK] thumb {thumb_key} ({len(body)} -> {out.getbuffer().nbytes} bytes)")
+    for out_key, dim, quality in missing:
+        img = base.copy()
+        img.thumbnail((dim, dim))
+        out = io.BytesIO()
+        img.save(out, format="WEBP", quality=quality, method=4)
+        s3.put_object(
+            Bucket=bucket,
+            Key=out_key,
+            Body=out.getvalue(),
+            ContentType="image/webp",
+            CacheControl="public, max-age=31536000, immutable",
+        )
+        print(f"[OK] {out_key} ({len(body)} -> {out.getbuffer().nbytes} bytes)")

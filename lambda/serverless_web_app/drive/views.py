@@ -183,15 +183,20 @@ def _thumb_key(s3_key):
     return f"thumbs/{s3_key}.webp"
 
 
+def _preview_key(s3_key):
+    return f"previews/{s3_key}.webp"
+
+
 def _move_thumb(s3, old_key, new_key):
-    try:
-        _s3_move(s3, _thumb_key(old_key), _thumb_key(new_key))
-    except ClientError:
-        pass  # no thumb yet (non-image, or generation still in flight)
+    for derive in (_thumb_key, _preview_key):
+        try:
+            _s3_move(s3, derive(old_key), derive(new_key))
+        except ClientError:
+            pass  # derivative missing (non-image, or generation in flight)
 
 
 def _delete_object_and_thumb(s3, s3_key):
-    for key in (s3_key, _thumb_key(s3_key)):
+    for key in (s3_key, _thumb_key(s3_key), _preview_key(s3_key)):
         try:
             s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=key)
         except ClientError:
@@ -538,7 +543,17 @@ def get_file_url(request, pk):
             {"error": "archived", "message": "This file is archived and cannot be previewed."},
             status=400,
         )
-    signed_url = _get_cloudfront_signed_url(file.s3_key, expires_seconds=3600)
+    target_key = file.s3_key
+    if file.content_type.startswith("image/"):
+        # Lightbox gets the ~1600px WebP derivative (a few hundred KB)
+        # instead of the multi-MB original; download still uses the original.
+        preview = _preview_key(file.s3_key)
+        try:
+            _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=preview)
+            target_key = preview
+        except ClientError:
+            _request_thumbnail(file.s3_key)  # backfill; serve original this once
+    signed_url = _get_cloudfront_signed_url(target_key, expires_seconds=3600)
     return JsonResponse({
         "url": signed_url,
         "content_type": file.content_type,
