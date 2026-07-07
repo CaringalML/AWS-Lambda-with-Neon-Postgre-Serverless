@@ -66,7 +66,6 @@ resource "aws_lambda_function" "notify" {
 
   environment {
     variables = {
-      AWS_REGION              = var.aws_region
       DYNAMODB_FILES_TABLE    = aws_dynamodb_table.files.name
       SSM_RESEND_API_KEY_NAME = aws_ssm_parameter.resend_api_key.name
       DRIVE_FROM_EMAIL        = "noreply@nodepulsecaringal.xyz"
