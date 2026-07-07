@@ -1,12 +1,10 @@
 import datetime
+import itertools
 import json
 import logging
 import os
 import uuid
 from urllib.parse import quote
-from django.db.models import Sum
-
-logger = logging.getLogger(__name__)
 
 import resend
 
@@ -18,50 +16,57 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from django.conf import settings
-from django.http import JsonResponse, HttpResponse
-from django.shortcuts import render, get_object_or_404, redirect
+from django.http import JsonResponse, HttpResponse, Http404
+from django.shortcuts import render, redirect
 from django.views.decorators.http import require_POST
 
 from accounts.decorators import cognito_login_required
-from .models import DriveFile, DriveFolder, BatchJob
+from .models import DriveFile, DriveFolder, BatchJob, _ListProxy
+from . import dal
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level cache — survives across Lambda invocations in the same container
 # ---------------------------------------------------------------------------
 _cf_private_key_cache = None
 
+_STORAGE_CAP_BYTES = 15 * 1024 ** 3  # 15 GB display cap
 
-def _get_folder_path(folder_pk, owner_sub):
-    """Walk the folder parent chain and return a safe S3 path string.
 
-    e.g. folder 'vacation' inside 'photos' → 'photos/vacation'
-    Root uploads (folder_pk is None) return None (no extra path segment).
-    """
-    if not folder_pk:
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _parse_dt(s):
+    if not s:
+        return None
+    if isinstance(s, datetime.datetime):
+        return s
+    return datetime.datetime.fromisoformat(s)
+
+
+def _get_folder_path(folder_id, owner_sub):
+    """Walk the folder parent chain and return a safe S3 path string."""
+    if not folder_id:
         return None
     parts = []
     visited = set()
-    try:
-        folder = DriveFolder.objects.get(pk=folder_pk, owner_sub=owner_sub)
-        while folder and folder.pk not in visited:
-            visited.add(folder.pk)
-            safe = "".join(
-                c if c.isalnum() or c in "-_. " else "_" for c in folder.name
-            ).strip() or "_"
-            parts.insert(0, safe)
-            folder = folder.parent
-    except DriveFolder.DoesNotExist:
-        pass
+    fid = folder_id
+    while fid and fid not in visited:
+        visited.add(fid)
+        folder = dal.get_folder(fid)
+        if not folder or folder.owner_sub != owner_sub:
+            break
+        safe = "".join(
+            c if c.isalnum() or c in "-_. " else "_" for c in folder.name
+        ).strip() or "_"
+        parts.insert(0, safe)
+        fid = folder.parent_id
     return "/".join(parts) if parts else None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _get_resend_api_key():
-    """Fetch Resend API key fresh from SSM each time — avoids cold-start caching."""
     if key := os.environ.get("RESEND_API_KEY"):
         return key
     param_name = settings.SSM_RESEND_API_KEY_NAME
@@ -81,14 +86,10 @@ def _s3():
 
 
 def _get_owner_sub(request):
-    """Return the Cognito sub stored in the session."""
     return request.session.get("user_sub", "")
 
 
 def _get_cloudfront_signed_url(s3_key, expires_seconds=300):
-    """Generate a CloudFront signed URL valid for expires_seconds.
-    Private key is cached in the module-level global so SSM is only hit
-    once per Lambda container (cold start), not on every request."""
     global _cf_private_key_cache
     if _cf_private_key_cache is None:
         ssm = boto3.client("ssm", region_name=settings.AWS_REGION)
@@ -98,14 +99,10 @@ def _get_cloudfront_signed_url(s3_key, expires_seconds=300):
         )["Parameter"]["Value"]
         _cf_private_key_cache = serialization.load_pem_private_key(pem.encode(), password=None)
 
-    private_key = _cf_private_key_cache
-
     def rsa_signer(message):
-        return private_key.sign(message, padding.PKCS1v15(), hashes.SHA1())
+        return _cf_private_key_cache.sign(message, padding.PKCS1v15(), hashes.SHA1())
 
     cf_signer = CloudFrontSigner(settings.CLOUDFRONT_KEY_PAIR_ID, rsa_signer)
-    # URL-encode the path (spaces → %20 etc.) so the signature matches what
-    # the browser actually requests. safe='/' preserves path separators.
     encoded_key = quote(s3_key, safe="/")
     url = f"https://{settings.CLOUDFRONT_DOMAIN}/{encoded_key}"
     expire_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=expires_seconds)
@@ -113,178 +110,58 @@ def _get_cloudfront_signed_url(s3_key, expires_seconds=300):
 
 
 def _build_breadcrumbs(folder):
-    """Walk up the parent chain and return [root, ..., folder].
-    visited set guards against circular parent references in corrupt data."""
+    """Walk up the parent chain and return [root, ..., folder]."""
     crumbs = []
     visited = set()
     node = folder
-    while node and node.pk not in visited:
-        visited.add(node.pk)
+    while node and node.folder_id not in visited:
+        visited.add(node.folder_id)
         crumbs.insert(0, node)
-        node = node.parent
+        node = dal.get_folder(node.parent_id) if node.parent_id else None
     return crumbs
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _build_sidebar_tree(owner_sub):
+    """Build 3-level folder tree for the sidebar."""
+    root_folders = dal.list_subfolders(owner_sub, None, active_only=True)
+    for f in root_folders:
+        level2 = dal.list_subfolders(owner_sub, f.folder_id, active_only=True)
+        for sf in level2:
+            level3 = dal.list_subfolders(owner_sub, sf.folder_id, active_only=True)
+            sf.subfolders = _ListProxy(level3)
+        f.subfolders = _ListProxy(level2)
+    return root_folders
 
-_STORAGE_CAP_BYTES = 15 * 1024 ** 3  # 15 GB display cap for the bar
 
 def _storage_stats(owner_sub):
-    """Return (used_bytes, used_display, pct) for all non-deleted files owned by owner_sub."""
-    result = DriveFile.objects.filter(
-        owner_sub=owner_sub, deleted_at__isnull=True
-    ).aggregate(total=Sum('size'))
-    raw = result['total'] or 0
+    active = [f for f in dal.list_all_files(owner_sub) if not f.deleted_at]
+    raw = sum(f.size for f in active)
     pct = min(100, round(raw / _STORAGE_CAP_BYTES * 100, 1))
     total = float(raw)
-    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
         if total < 1024:
-            display = f"{total:.1f} {unit}"
-            return raw, display, pct
+            return raw, f"{total:.1f} {unit}", pct
         total /= 1024
     return raw, f"{total:.1f} PB", pct
 
 
-# ---------------------------------------------------------------------------
-# Views
-# ---------------------------------------------------------------------------
-
-@cognito_login_required
-def drive_home(request, folder_pk=None):
-    owner_sub = _get_owner_sub(request)
-    current_folder = None
-    breadcrumbs = []
-    if folder_pk:
-        current_folder = get_object_or_404(DriveFolder, pk=folder_pk, owner_sub=owner_sub)
-        breadcrumbs = _build_breadcrumbs(current_folder)
-
-    from django.db.models import Q, Prefetch
-    now = datetime.datetime.now(datetime.timezone.utc)
-
-    # Expire any restored files whose 7-day window has passed — reset back to archived
-    DriveFile.objects.filter(
-        owner_sub=owner_sub,
-        restore_status=DriveFile.RESTORE_READY,
-        restore_expires_at__isnull=False,
-        restore_expires_at__lt=now,
-    ).update(restore_status="", restore_expires_at=None)
-
-    q = request.GET.get("q", "").strip()
-
-    if q:
-        # Global search — span all folders so users can find any file by name
-        files = DriveFile.objects.filter(
-            owner_sub=owner_sub,
-            deleted_at__isnull=True,
-            name__icontains=q,
-        ).filter(
-            Q(storage_class=DriveFile.GLACIER_IR)
-            | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
-        )
-        subfolders = DriveFolder.objects.filter(
-            owner_sub=owner_sub,
-            deleted_at__isnull=True,
-            name__icontains=q,
-        )
-    else:
-        # Normal folder-scoped listing
-        files = DriveFile.objects.filter(
-            owner_sub=owner_sub,
-            folder=current_folder,
-            deleted_at__isnull=True,
-        ).filter(
-            # Show instantly-accessible files, or Deep Archive / Glacier files that have been restored
-            Q(storage_class=DriveFile.GLACIER_IR)
-            | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
-        )
-        subfolders = DriveFolder.objects.filter(owner_sub=owner_sub, parent=current_folder, deleted_at__isnull=True)
-
-    ctx = {
-        "files": files,
-        "subfolders": subfolders,
-        "current_folder": current_folder,
-        "breadcrumbs": breadcrumbs,
-        "search_query": q,
-    }
-
-    if request.headers.get("HX-Request"):
-        return render(request, "drive/partials/search_results.html", ctx)
-
-    active_subfolders = DriveFolder.objects.filter(deleted_at__isnull=True)
-    ctx["sidebar_folders"] = DriveFolder.objects.filter(
-        owner_sub=owner_sub, parent=None, deleted_at__isnull=True
-    ).prefetch_related(
-        Prefetch('subfolders', queryset=active_subfolders),
-        Prefetch('subfolders__subfolders', queryset=active_subfolders),
-        Prefetch('subfolders__subfolders__subfolders', queryset=active_subfolders),
-    )
-    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True).count()
-
-    response = render(request, "drive/home.html", ctx)
-    response["Cache-Control"] = "no-store"
-    return response
-
-
-@cognito_login_required
-@require_POST
-def create_folder(request):
-    """Create a new folder and return its rendered row HTML."""
-    try:
-        data = json.loads(request.body)
-        name = data.get("name", "").strip()
-        parent_pk = data.get("parent_pk")
-        owner_sub = _get_owner_sub(request)
-
-        if not name:
-            return JsonResponse({"error": "Folder name is required"}, status=400)
-
-        parent = None
-        if parent_pk:
-            parent = get_object_or_404(DriveFolder, pk=parent_pk, owner_sub=owner_sub)
-
-        folder = DriveFolder.objects.create(
-            owner_sub=owner_sub,
-            name=name,
-            parent=parent,
-        )
-
-        html = render(request, "drive/partials/folder_row.html", {"folder": folder}).content.decode()
-        return JsonResponse({"html": html, "id": folder.id})
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
-
-
-def _collect_folder_ids(root):
-    """Iteratively walk the folder subtree and return a list of all folder PKs."""
+def _collect_folder_ids(folder, owner_sub):
+    """BFS walk of folder subtree; returns all folder IDs including root."""
     ids = []
-    queue = [root]
+    queue = [folder.folder_id]
     visited = set()
     while queue:
-        f = queue.pop()
-        if f.pk in visited:
+        fid = queue.pop()
+        if fid in visited:
             continue
-        visited.add(f.pk)
-        ids.append(f.pk)
-        queue.extend(f.subfolders.all())
+        visited.add(fid)
+        ids.append(fid)
+        for sf in dal.list_subfolders(owner_sub, fid, active_only=False):
+            queue.append(sf.folder_id)
     return ids
 
 
-@cognito_login_required
-@require_POST
-def delete_folder(request, pk):
-    """Soft-delete a folder — moves it to Recycle Bin. Files inside stay linked to the folder."""
-    owner_sub = _get_owner_sub(request)
-    folder = get_object_or_404(DriveFolder, pk=pk, owner_sub=owner_sub, deleted_at__isnull=True)
-    folder.deleted_at = datetime.datetime.now(datetime.timezone.utc)
-    folder.save(update_fields=['deleted_at'])
-    return HttpResponse("")
-
-
 def _s3_move(s3, old_key, new_key):
-    """Copy an S3 object to a new key then delete the original."""
     s3.copy_object(
         Bucket=settings.DRIVE_BUCKET_NAME,
         CopySource={"Bucket": settings.DRIVE_BUCKET_NAME, "Key": old_key},
@@ -294,63 +171,187 @@ def _s3_move(s3, old_key, new_key):
     s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=old_key)
 
 
+def _require_folder(folder_id, owner_sub):
+    folder = dal.get_folder(folder_id)
+    if not folder or folder.owner_sub != owner_sub:
+        raise Http404
+    return folder
+
+
+def _require_file(file_id, owner_sub):
+    f = dal.get_file(file_id)
+    if not f or f.owner_sub != owner_sub:
+        raise Http404
+    return f
+
+
+# ---------------------------------------------------------------------------
+# Views — Drive home
+# ---------------------------------------------------------------------------
+
+@cognito_login_required
+def drive_home(request, folder_pk=None):
+    owner_sub = _get_owner_sub(request)
+    current_folder = None
+    breadcrumbs = []
+    if folder_pk:
+        current_folder = _require_folder(folder_pk, owner_sub)
+        breadcrumbs = _build_breadcrumbs(current_folder)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    all_files = dal.list_all_files(owner_sub)
+    active_files = [f for f in all_files if not f.deleted_at]
+
+    # Expire restored files whose 7-day window has passed
+    for f in active_files:
+        if (f.restore_status == DriveFile.RESTORE_READY
+                and f.restore_expires_at
+                and _parse_dt(f.restore_expires_at) < now):
+            dal.clear_restore_status(f.file_id)
+            f.restore_status = ""
+            f.restore_expires_at = None
+
+    q = request.GET.get("q", "").strip()
+    current_folder_id = current_folder.folder_id if current_folder else None
+
+    if q:
+        ql = q.lower()
+        files = [
+            f for f in active_files
+            if ql in f.name.lower()
+            and (f.storage_class == DriveFile.GLACIER_IR
+                 or (f.storage_class == DriveFile.DEEP_ARCHIVE
+                     and f.restore_status == DriveFile.RESTORE_READY))
+        ]
+        all_folders = dal.list_all_folders(owner_sub)
+        subfolders = [fld for fld in all_folders if not fld.deleted_at and ql in fld.name.lower()]
+    else:
+        folder_files = [f for f in active_files if f.folder_id == current_folder_id]
+        files = [
+            f for f in folder_files
+            if f.storage_class == DriveFile.GLACIER_IR
+            or (f.storage_class == DriveFile.DEEP_ARCHIVE
+                and f.restore_status == DriveFile.RESTORE_READY)
+        ]
+        files.sort(key=lambda f: f.uploaded_at, reverse=True)
+        subfolders = dal.list_subfolders(owner_sub, current_folder_id, active_only=True)
+
+    ctx = {
+        "files":          files,
+        "subfolders":     subfolders,
+        "current_folder": current_folder,
+        "breadcrumbs":    breadcrumbs,
+        "search_query":   q,
+    }
+
+    if request.headers.get("HX-Request"):
+        return render(request, "drive/partials/search_results.html", ctx)
+
+    ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
+    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
+    ctx["total_files"] = len(active_files)
+
+    response = render(request, "drive/home.html", ctx)
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Folder CRUD
+# ---------------------------------------------------------------------------
+
 @cognito_login_required
 @require_POST
-def rename_folder(request, pk):
-    """Rename a folder and move all files in its subtree to new S3 keys."""
-    owner_sub = _get_owner_sub(request)
-    folder = get_object_or_404(DriveFolder, pk=pk, owner_sub=owner_sub, deleted_at__isnull=True)
+def create_folder(request):
     try:
         data = json.loads(request.body)
         name = data.get("name", "").strip()
+        parent_pk = data.get("parent_pk")
+        owner_sub = _get_owner_sub(request)
+
         if not name:
-            return JsonResponse({"error": "Name cannot be empty."}, status=400)
+            return JsonResponse({"error": "Folder name is required"}, status=400)
 
-        # Compute old path BEFORE renaming
-        old_path = _get_folder_path(pk, owner_sub)  # e.g. "photos/vacation"
-        old_prefix = f"{owner_sub}/{old_path}/" if old_path else f"{owner_sub}/"
+        parent_id = None
+        if parent_pk:
+            parent = _require_folder(parent_pk, owner_sub)
+            parent_id = parent.folder_id
 
-        # Rename in DB
-        folder.name = name
-        folder.save(update_fields=["name"])
-
-        # Compute new path AFTER renaming
-        new_path = _get_folder_path(pk, owner_sub)
-        new_prefix = f"{owner_sub}/{new_path}/" if new_path else f"{owner_sub}/"
-
-        # Move all files in the subtree to new S3 keys
-        if old_prefix != new_prefix:
-            s3 = _s3()
-            all_folder_ids = _collect_folder_ids(folder)
-            files = DriveFile.objects.filter(folder_id__in=all_folder_ids, owner_sub=owner_sub)
-            for f in files:
-                if f.s3_key.startswith(old_prefix):
-                    new_key = new_prefix + f.s3_key[len(old_prefix):]
-                    try:
-                        _s3_move(s3, f.s3_key, new_key)
-                        f.s3_key = new_key
-                        f.save(update_fields=["s3_key"])
-                    except ClientError as e:
-                        logger.error("S3 move failed %s → %s: %s", f.s3_key, new_key, e)
-
-        return JsonResponse({"id": folder.pk, "name": folder.name})
+        folder = dal.create_folder(owner_sub, name, parent_id)
+        html = render(request, "drive/partials/folder_row.html", {"folder": folder}).content.decode()
+        return JsonResponse({"html": html, "id": folder.folder_id})
+    except Http404:
+        return JsonResponse({"error": "Parent folder not found"}, status=404)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
 
 @cognito_login_required
 @require_POST
-def rename_file(request, pk):
-    """Rename a file and move it to the new S3 key."""
+def delete_folder(request, pk):
     owner_sub = _get_owner_sub(request)
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=owner_sub, deleted_at__isnull=True)
+    folder = _require_folder(pk, owner_sub)
+    if folder.deleted_at:
+        raise Http404
+    dal.soft_delete_folder(folder.folder_id)
+    return HttpResponse("")
+
+
+@cognito_login_required
+@require_POST
+def rename_folder(request, pk):
+    owner_sub = _get_owner_sub(request)
+    folder = _require_folder(pk, owner_sub)
+    if folder.deleted_at:
+        raise Http404
     try:
         data = json.loads(request.body)
         name = data.get("name", "").strip()
         if not name:
             return JsonResponse({"error": "Name cannot be empty."}, status=400)
 
-        # Build new S3 key — same directory, new filename
+        old_path = _get_folder_path(pk, owner_sub)
+        old_prefix = f"{owner_sub}/{old_path}/" if old_path else f"{owner_sub}/"
+
+        dal.rename_folder(folder.folder_id, name)
+
+        new_path = _get_folder_path(pk, owner_sub)
+        new_prefix = f"{owner_sub}/{new_path}/" if new_path else f"{owner_sub}/"
+
+        if old_prefix != new_prefix:
+            s3 = _s3()
+            for fid in _collect_folder_ids(folder, owner_sub):
+                for f in dal.list_files_in_folder(fid, active_only=False):
+                    if f.s3_key.startswith(old_prefix):
+                        new_key = new_prefix + f.s3_key[len(old_prefix):]
+                        try:
+                            _s3_move(s3, f.s3_key, new_key)
+                            dal.update_file_s3key(f.file_id, new_key)
+                        except ClientError as e:
+                            logger.error("S3 move failed %s → %s: %s", f.s3_key, new_key, e)
+
+        return JsonResponse({"id": folder.folder_id, "name": name})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+# ---------------------------------------------------------------------------
+# File CRUD
+# ---------------------------------------------------------------------------
+
+@cognito_login_required
+@require_POST
+def rename_file(request, pk):
+    owner_sub = _get_owner_sub(request)
+    file = _require_file(pk, owner_sub)
+    if file.deleted_at:
+        raise Http404
+    try:
+        data = json.loads(request.body)
+        name = data.get("name", "").strip()
+        if not name:
+            return JsonResponse({"error": "Name cannot be empty."}, status=400)
+
         old_key = file.s3_key
         directory = old_key.rsplit("/", 1)[0] if "/" in old_key else owner_sub
         new_key = f"{directory}/{name}"
@@ -358,13 +359,12 @@ def rename_file(request, pk):
         if old_key != new_key:
             try:
                 _s3_move(_s3(), old_key, new_key)
-                file.s3_key = new_key
             except ClientError as e:
                 logger.error("S3 move failed %s → %s: %s", old_key, new_key, e)
+                new_key = old_key  # keep old key if move failed
 
-        file.name = name
-        file.save(update_fields=["name", "s3_key"])
-        return JsonResponse({"id": file.pk, "name": file.name})
+        dal.update_file_name_and_key(file.file_id, name, new_key)
+        return JsonResponse({"id": file.file_id, "name": name})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -372,10 +372,12 @@ def rename_file(request, pk):
 @cognito_login_required
 @require_POST
 def upload_url(request):
-    """Return a presigned S3 POST URL — the browser uploads directly to S3."""
     try:
         if not settings.DRIVE_BUCKET_NAME:
-            return JsonResponse({"error": "DRIVE_BUCKET_NAME env var not set — has Terraform been applied?"}, status=500)
+            return JsonResponse(
+                {"error": "DRIVE_BUCKET_NAME not set — has Terraform been applied?"},
+                status=500,
+            )
 
         data = json.loads(request.body)
         filename     = data.get("filename", "unnamed")
@@ -384,14 +386,10 @@ def upload_url(request):
         folder_pk    = data.get("folder_pk")
 
         folder_path = _get_folder_path(folder_pk, owner_sub)
-        if folder_path:
-            s3_key = f"{owner_sub}/{folder_path}/{filename}"
-        else:
-            s3_key = f"{owner_sub}/{filename}"
+        s3_key = f"{owner_sub}/{folder_path}/{filename}" if folder_path else f"{owner_sub}/{filename}"
 
-        exists = DriveFile.objects.filter(
-            s3_key=s3_key, owner_sub=owner_sub, deleted_at__isnull=True
-        ).exists()
+        existing = dal.get_file_by_s3key(s3_key)
+        exists = existing is not None and not existing.deleted_at
 
         presigned = _s3().generate_presigned_post(
             Bucket=settings.DRIVE_BUCKET_NAME,
@@ -399,11 +397,12 @@ def upload_url(request):
             Fields={"Content-Type": content_type},
             Conditions=[
                 {"Content-Type": content_type},
-                ["content-length-range", 1, 500 * 1024 * 1024],  # max 500 MB
+                ["content-length-range", 1, 500 * 1024 * 1024],
             ],
             ExpiresIn=300,
         )
-        return JsonResponse({"url": presigned["url"], "fields": presigned["fields"], "s3_key": s3_key, "exists": exists})
+        return JsonResponse({"url": presigned["url"], "fields": presigned["fields"],
+                             "s3_key": s3_key, "exists": exists})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -411,44 +410,34 @@ def upload_url(request):
 @cognito_login_required
 @require_POST
 def confirm_upload(request):
-    """Save file metadata after successful S3 upload."""
     try:
         data = json.loads(request.body)
         owner_sub = _get_owner_sub(request)
         folder_pk = data.get("folder_pk")
 
-        folder = None
+        folder_id = None
         if folder_pk:
-            folder = get_object_or_404(DriveFolder, pk=folder_pk, owner_sub=owner_sub)
+            folder = _require_folder(folder_pk, owner_sub)
+            folder_id = folder.folder_id
 
-        # Verify the object actually exists in S3
-        head = _s3().head_object(
-            Bucket=settings.DRIVE_BUCKET_NAME,
-            Key=data["s3_key"],
-        )
+        head = _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=data["s3_key"])
 
         captured_at = None
-        captured_at_str = data.get("captured_at")
-        if captured_at_str:
+        if cap_str := data.get("captured_at"):
             try:
-                captured_at = datetime.datetime.fromisoformat(captured_at_str.replace("Z", "+00:00"))
+                captured_at = datetime.datetime.fromisoformat(cap_str.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 pass
 
-        drive_file, created = DriveFile.objects.update_or_create(
+        drive_file, created = dal.upsert_file(
             s3_key=data["s3_key"],
-            defaults={
-                "owner_sub": owner_sub,
-                "name": data["filename"],
-                "size": head["ContentLength"],
-                "content_type": head.get("ContentType", "application/octet-stream"),
-                "folder": folder,
-                "storage_class": DriveFile.GLACIER_IR,
-                "deleted_at": None,
-                "restore_status": "",
-                "restore_expires_at": None,
-                "captured_at": captured_at,
-            },
+            owner_sub=owner_sub,
+            name=data["filename"],
+            size=head["ContentLength"],
+            content_type=head.get("ContentType", "application/octet-stream"),
+            folder_id=folder_id,
+            storage_class=DriveFile.GLACIER_IR,
+            captured_at=captured_at,
         )
 
         _s3().copy_object(
@@ -461,18 +450,21 @@ def confirm_upload(request):
 
         html = render(request, "drive/partials/file_row.html", {"file": drive_file}).content.decode()
         _, storage_used, _ = _storage_stats(owner_sub)
-        return JsonResponse({"html": html, "id": drive_file.id, "storage_used": storage_used, "overwritten": not created})
+        return JsonResponse({"html": html, "id": drive_file.file_id,
+                             "storage_used": storage_used, "overwritten": not created})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
 
+# ---------------------------------------------------------------------------
+# File serving
+# ---------------------------------------------------------------------------
+
 @cognito_login_required
 def download_file(request, pk):
-    """Redirect to a presigned S3 GET URL with Content-Disposition: attachment."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request))
+    file = _require_file(pk, _get_owner_sub(request))
     if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
         return HttpResponse("This file is archived and cannot be downloaded directly.", status=400)
-
     presigned_url = _s3().generate_presigned_url(
         "get_object",
         Params={
@@ -488,8 +480,7 @@ def download_file(request, pk):
 
 @cognito_login_required
 def get_file_url(request, pk):
-    """Return a signed CloudFront URL as JSON for the in-browser preview modal."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request))
+    file = _require_file(pk, _get_owner_sub(request))
     if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
         return JsonResponse(
             {"error": "archived", "message": "This file is archived and cannot be previewed."},
@@ -506,22 +497,16 @@ def get_file_url(request, pk):
 
 @cognito_login_required
 def view_file(request, pk):
-    """Redirect to a short-lived CloudFront signed URL (fallback / direct link)."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request))
-
+    file = _require_file(pk, _get_owner_sub(request))
     if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
         return render(request, "drive/archived.html", {"file": file})
-
     signed_url = _get_cloudfront_signed_url(file.s3_key, expires_seconds=3600)
     return redirect(signed_url)
 
 
 @cognito_login_required
 def file_thumbnail(request, pk):
-    """Redirect to a 1-hour CloudFront signed URL for image/video thumbnails.
-    Browser caches the redirect for 1 hour so Lambda is only hit once per file
-    per session. Only serves image/* and video/* — returns 404 for everything else."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request))
+    file = _require_file(pk, _get_owner_sub(request))
     if not (file.content_type.startswith("image/") or file.content_type.startswith("video/")):
         return HttpResponse(status=404)
     if file.is_archived() and file.restore_status != DriveFile.RESTORE_READY:
@@ -532,32 +517,35 @@ def file_thumbnail(request, pk):
     return response
 
 
+# ---------------------------------------------------------------------------
+# Delete / restore / recycle bin
+# ---------------------------------------------------------------------------
+
 @cognito_login_required
 @require_POST
 def delete_file(request, pk):
-    """Soft-delete: move to Recycle Bin. Permanent deletion happens after 30 days."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request), deleted_at__isnull=True)
-    file.deleted_at = datetime.datetime.now(datetime.timezone.utc)
-    file.save(update_fields=["deleted_at"])
+    owner_sub = _get_owner_sub(request)
+    file = _require_file(pk, owner_sub)
+    if file.deleted_at:
+        raise Http404
+    dal.soft_delete_file(file.file_id)
     return HttpResponse("")
 
 
 @cognito_login_required
 @require_POST
 def bulk_delete(request):
-    """Soft-delete multiple files at once."""
     try:
         data = json.loads(request.body)
         file_ids = data.get("ids", [])
         owner_sub = _get_owner_sub(request)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        deleted_ids = list(
-            DriveFile.objects.filter(
-                id__in=file_ids, owner_sub=owner_sub, deleted_at__isnull=True
-            ).values_list("id", flat=True)
-        )
-        DriveFile.objects.filter(id__in=deleted_ids).update(deleted_at=now)
-        return JsonResponse({"deleted": deleted_ids})
+        deleted = []
+        for fid in file_ids:
+            f = dal.get_file(fid)
+            if f and f.owner_sub == owner_sub and not f.deleted_at:
+                dal.soft_delete_file(f.file_id)
+                deleted.append(f.file_id)
+        return JsonResponse({"deleted": deleted})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -565,10 +553,12 @@ def bulk_delete(request):
 @cognito_login_required
 @require_POST
 def restore_from_bin(request, pk):
-    """Restore a file from the Recycle Bin back to My Drive."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request), deleted_at__isnull=False)
+    owner_sub = _get_owner_sub(request)
+    file = _require_file(pk, owner_sub)
+    if not file.deleted_at:
+        raise Http404
+    dal.restore_file(file.file_id)
     file.deleted_at = None
-    file.save(update_fields=["deleted_at"])
     html = render(request, "drive/partials/recycle_row.html", {"file": file}).content.decode()
     return JsonResponse({"restored": True, "html": html})
 
@@ -576,36 +566,45 @@ def restore_from_bin(request, pk):
 @cognito_login_required
 @require_POST
 def restore_folder_from_bin(request, pk):
-    """Restore a folder from the Recycle Bin back to My Drive."""
-    folder = get_object_or_404(DriveFolder, pk=pk, owner_sub=_get_owner_sub(request), deleted_at__isnull=False)
-    folder.deleted_at = None
-    folder.save(update_fields=['deleted_at'])
+    owner_sub = _get_owner_sub(request)
+    folder = _require_folder(pk, owner_sub)
+    if not folder.deleted_at:
+        raise Http404
+    dal.restore_folder(folder.folder_id)
     return JsonResponse({"restored": True})
 
 
 @cognito_login_required
 @require_POST
 def bulk_bin_restore(request):
-    """Restore multiple files and/or folders from the Recycle Bin back to My Drive."""
     data = json.loads(request.body)
     file_ids = data.get("file_ids", [])
     folder_ids = data.get("folder_ids", [])
     owner_sub = _get_owner_sub(request)
-    files = list(DriveFile.objects.filter(pk__in=file_ids, owner_sub=owner_sub, deleted_at__isnull=False))
-    archived_ids = [f.pk for f in files if f.storage_class == DriveFile.DEEP_ARCHIVE]
-    DriveFile.objects.filter(pk__in=file_ids, owner_sub=owner_sub, deleted_at__isnull=False).update(deleted_at=None)
-    DriveFolder.objects.filter(pk__in=folder_ids, owner_sub=owner_sub, deleted_at__isnull=False).update(deleted_at=None)
+
+    archived_ids = []
+    for fid in file_ids:
+        f = dal.get_file(fid)
+        if f and f.owner_sub == owner_sub and f.deleted_at:
+            if f.storage_class == DriveFile.DEEP_ARCHIVE:
+                archived_ids.append(f.file_id)
+            dal.restore_file(f.file_id)
+
+    for fid in folder_ids:
+        folder = dal.get_folder(fid)
+        if folder and folder.owner_sub == owner_sub and folder.deleted_at:
+            dal.restore_folder(folder.folder_id)
+
     return JsonResponse({
-        "restored_files": list(file_ids),
-        "archived_file_ids": archived_ids,
-        "restored_folders": list(folder_ids),
+        "restored_files":     list(file_ids),
+        "archived_file_ids":  archived_ids,
+        "restored_folders":   list(folder_ids),
     })
 
 
 @cognito_login_required
 @require_POST
 def bulk_bin_delete(request):
-    """Permanently delete multiple files and/or folders from S3 and DB."""
     data = json.loads(request.body)
     file_ids = data.get("file_ids", [])
     folder_ids = data.get("folder_ids", [])
@@ -613,30 +612,30 @@ def bulk_bin_delete(request):
     s3 = _s3()
 
     deleted_file_ids = []
-    files = list(DriveFile.objects.filter(pk__in=file_ids, owner_sub=owner_sub, deleted_at__isnull=False))
-    for f in files:
-        pk = f.pk
-        try:
-            s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
-        except ClientError:
-            pass
-        f.delete()
-        deleted_file_ids.append(pk)
-
-    deleted_folder_ids = []
-    folders = list(DriveFolder.objects.filter(pk__in=folder_ids, owner_sub=owner_sub, deleted_at__isnull=False))
-    for folder in folders:
-        fid = folder.pk
-        all_folder_ids = _collect_folder_ids(folder)
-        files_inside = DriveFile.objects.filter(folder_id__in=all_folder_ids, owner_sub=owner_sub)
-        for f in files_inside:
+    for fid in file_ids:
+        f = dal.get_file(fid)
+        if f and f.owner_sub == owner_sub and f.deleted_at:
             try:
                 s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
             except ClientError:
                 pass
-        files_inside.delete()
-        folder.delete()  # CASCADE removes subfolders
-        deleted_folder_ids.append(fid)
+            dal.hard_delete_file(f.file_id)
+            deleted_file_ids.append(f.file_id)
+
+    deleted_folder_ids = []
+    for fid in folder_ids:
+        folder = dal.get_folder(fid)
+        if not folder or folder.owner_sub != owner_sub or not folder.deleted_at:
+            continue
+        for subfolder_id in _collect_folder_ids(folder, owner_sub):
+            for f in dal.list_files_in_folder(subfolder_id, active_only=False):
+                try:
+                    s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
+                except ClientError:
+                    pass
+                dal.hard_delete_file(f.file_id)
+            dal.hard_delete_folder(subfolder_id)
+        deleted_folder_ids.append(folder.folder_id)
 
     return JsonResponse({"deleted_files": deleted_file_ids, "deleted_folders": deleted_folder_ids})
 
@@ -644,106 +643,110 @@ def bulk_bin_delete(request):
 @cognito_login_required
 @require_POST
 def permanent_delete(request, pk):
-    """Permanently delete a file from S3 and DB — no recovery possible."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request), deleted_at__isnull=False)
+    owner_sub = _get_owner_sub(request)
+    file = _require_file(pk, owner_sub)
+    if not file.deleted_at:
+        raise Http404
     try:
         _s3().delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=file.s3_key)
     except ClientError:
         pass
-    file.delete()
+    dal.hard_delete_file(file.file_id)
     return HttpResponse("")
 
 
 @cognito_login_required
 def recycle_bin(request):
-    """Show all soft-deleted files and folders within the 30-day window."""
     owner_sub = _get_owner_sub(request)
     now = datetime.datetime.now(datetime.timezone.utc)
     cutoff = now - datetime.timedelta(days=30)
-
-    # Auto-permanently-delete expired files
-    expired_files = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__lt=cutoff)
     s3 = _s3()
-    for f in expired_files:
-        try:
-            s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
-        except ClientError:
-            pass
-    expired_files.delete()
 
-    # Auto-permanently-delete expired folders (and all files inside their subtree)
-    expired_folders = DriveFolder.objects.filter(owner_sub=owner_sub, deleted_at__isnull=False, deleted_at__lt=cutoff)
-    for folder in expired_folders:
-        folder_ids = _collect_folder_ids(folder)
-        files_inside = DriveFile.objects.filter(folder_id__in=folder_ids, owner_sub=owner_sub)
-        for f in files_inside:
+    # Auto-permanently-delete files expired from the 30-day window
+    all_files = dal.list_all_files(owner_sub)
+    for f in all_files:
+        if f.deleted_at and _parse_dt(f.deleted_at) < cutoff:
             try:
                 s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
             except ClientError:
                 pass
-        files_inside.delete()
-        folder.delete()  # CASCADE removes subfolders
+            dal.hard_delete_file(f.file_id)
+
+    # Auto-permanently-delete expired folders and their contents
+    all_folders = dal.list_all_folders(owner_sub)
+    for folder in all_folders:
+        if folder.deleted_at and _parse_dt(folder.deleted_at) < cutoff:
+            for subfolder_id in _collect_folder_ids(folder, owner_sub):
+                for f in dal.list_files_in_folder(subfolder_id, active_only=False):
+                    try:
+                        s3.delete_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=f.s3_key)
+                    except ClientError:
+                        pass
+                    dal.hard_delete_file(f.file_id)
+                dal.hard_delete_folder(subfolder_id)
+
+    # Re-fetch after cleanup
+    all_files = dal.list_all_files(owner_sub)
+    all_folders = dal.list_all_folders(owner_sub)
 
     q = request.GET.get("q", "").strip()
-    bin_files = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=False)
-    bin_folders = DriveFolder.objects.filter(owner_sub=owner_sub, deleted_at__isnull=False)
-    if q:
-        bin_files = bin_files.filter(name__icontains=q)
-        bin_folders = bin_folders.filter(name__icontains=q)
+    ql = q.lower()
 
-    # Annotate each deleted folder with its subtree content counts
-    bin_folders_list = list(bin_folders)
-    for folder in bin_folders_list:
-        folder_ids = _collect_folder_ids(folder)
-        folder.file_count = DriveFile.objects.filter(
-            folder_id__in=folder_ids, deleted_at__isnull=True
-        ).count()
+    bin_files = [f for f in all_files if f.deleted_at]
+    bin_folders = [fld for fld in all_folders if fld.deleted_at]
+    if q:
+        bin_files = [f for f in bin_files if ql in f.name.lower()]
+        bin_folders = [fld for fld in bin_folders if ql in fld.name.lower()]
+
+    for folder in bin_folders:
+        folder_ids = _collect_folder_ids(folder, owner_sub)
+        all_folder_files = []
+        for fid in folder_ids:
+            all_folder_files.extend(dal.list_files_in_folder(fid, active_only=False))
+        folder.file_count = len([f for f in all_folder_files if not f.deleted_at])
         folder.subfolder_count = len(folder_ids) - 1
 
     ctx = {
-        "files": bin_files,
-        "bin_folders": bin_folders_list,
-        "subfolders": [],
+        "files":          bin_files,
+        "bin_folders":    bin_folders,
+        "subfolders":     [],
         "current_folder": None,
-        "breadcrumbs": [],
+        "breadcrumbs":    [],
         "is_recycle_bin": True,
-        "search_query": q,
+        "search_query":   q,
     }
 
     if request.headers.get("HX-Request"):
         return render(request, "drive/partials/search_results.html", ctx)
 
-    from django.db.models import Prefetch
-    active_subfolders = DriveFolder.objects.filter(deleted_at__isnull=True)
-    ctx["sidebar_folders"] = DriveFolder.objects.filter(
-        owner_sub=owner_sub, parent=None, deleted_at__isnull=True
-    ).prefetch_related(
-        Prefetch('subfolders', queryset=active_subfolders),
-        Prefetch('subfolders__subfolders', queryset=active_subfolders),
-        Prefetch('subfolders__subfolders__subfolders', queryset=active_subfolders),
-    )
+    active_files = [f for f in all_files if not f.deleted_at]
+    ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
     _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True).count()
+    ctx["total_files"] = len(active_files)
 
     response = render(request, "drive/home.html", ctx)
     response["Cache-Control"] = "no-store"
     return response
 
 
+# ---------------------------------------------------------------------------
+# Archive / Glacier
+# ---------------------------------------------------------------------------
+
 @cognito_login_required
 @require_POST
 def archive_files(request):
-    """Move selected files to Glacier Deep Archive and notify the user by email."""
     try:
-        data      = json.loads(request.body)
-        file_ids  = data.get("ids", [])
+        data = json.loads(request.body)
+        file_ids = data.get("ids", [])
         owner_sub = _get_owner_sub(request)
 
-        files        = DriveFile.objects.filter(id__in=file_ids, owner_sub=owner_sub)
         updated_html = []
         archived_names = []
-
-        for f in files:
+        for fid in file_ids:
+            f = dal.get_file(fid)
+            if not f or f.owner_sub != owner_sub:
+                continue
             _s3().copy_object(
                 Bucket=settings.DRIVE_BUCKET_NAME,
                 CopySource={"Bucket": settings.DRIVE_BUCKET_NAME, "Key": f.s3_key},
@@ -751,16 +754,15 @@ def archive_files(request):
                 StorageClass="DEEP_ARCHIVE",
                 MetadataDirective="COPY",
             )
+            dal.update_file_storage_class(f.file_id, "DEEP_ARCHIVE")
             f.storage_class = "DEEP_ARCHIVE"
-            f.save(update_fields=["storage_class"])
             html = render(request, "drive/partials/file_row.html", {"file": f}).content.decode()
-            updated_html.append({"id": f.id, "html": html})
+            updated_html.append({"id": f.file_id, "html": html})
             archived_names.append(f.name)
 
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    # Email send is outside the try/except so S3 errors and email errors are independent
     user_email = request.session.get("user_email", "")
     if user_email and archived_names:
         try:
@@ -773,41 +775,36 @@ def archive_files(request):
 
 @cognito_login_required
 def archive_view(request):
-    """Show all archived files (Deep Archive / Glacier) across all folders."""
     owner_sub = _get_owner_sub(request)
     q = request.GET.get("q", "").strip()
 
-    archived_files = DriveFile.objects.filter(
-        owner_sub=owner_sub,
-        storage_class=DriveFile.DEEP_ARCHIVE,
-        deleted_at__isnull=True,
-    ).exclude(restore_status=DriveFile.RESTORE_READY)
+    all_files = dal.list_all_files(owner_sub)
+    archived_files = [
+        f for f in all_files
+        if not f.deleted_at
+        and f.storage_class == DriveFile.DEEP_ARCHIVE
+        and f.restore_status != DriveFile.RESTORE_READY
+    ]
     if q:
-        archived_files = archived_files.filter(name__icontains=q)
+        ql = q.lower()
+        archived_files = [f for f in archived_files if ql in f.name.lower()]
 
     ctx = {
-        "files": archived_files,
-        "subfolders": [],
+        "files":          archived_files,
+        "subfolders":     [],
         "current_folder": None,
-        "breadcrumbs": [],
+        "breadcrumbs":    [],
         "is_archive_view": True,
-        "search_query": q,
+        "search_query":   q,
     }
 
     if request.headers.get("HX-Request"):
         return render(request, "drive/partials/search_results.html", ctx)
 
-    from django.db.models import Prefetch as _Prefetch
-    _active_subfolders = DriveFolder.objects.filter(deleted_at__isnull=True)
-    ctx["sidebar_folders"] = DriveFolder.objects.filter(
-        owner_sub=owner_sub, parent=None, deleted_at__isnull=True
-    ).prefetch_related(
-        _Prefetch('subfolders', queryset=_active_subfolders),
-        _Prefetch('subfolders__subfolders', queryset=_active_subfolders),
-        _Prefetch('subfolders__subfolders__subfolders', queryset=_active_subfolders),
-    )
+    active_files = [f for f in all_files if not f.deleted_at]
+    ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
     _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True).count()
+    ctx["total_files"] = len(active_files)
 
     response = render(request, "drive/home.html", ctx)
     response["Cache-Control"] = "no-store"
@@ -817,24 +814,20 @@ def archive_view(request):
 @cognito_login_required
 @require_POST
 def bulk_restore(request):
-    """Initiate Glacier restore for multiple selected archived files."""
-    data      = json.loads(request.body)
-    file_ids  = data.get("ids", [])
+    data = json.loads(request.body)
+    file_ids = data.get("ids", [])
     owner_sub = _get_owner_sub(request)
     user_email = request.session.get("user_email", "")
 
-    files = DriveFile.objects.filter(
-        id__in=file_ids,
-        owner_sub=owner_sub,
-        storage_class=DriveFile.DEEP_ARCHIVE,
-        restore_status="",
-        deleted_at__isnull=True,
-    )
-
     updated_html = []
     restored_names = []
-
-    for f in files:
+    for fid in file_ids:
+        f = dal.get_file(fid)
+        if (not f or f.owner_sub != owner_sub
+                or f.storage_class != DriveFile.DEEP_ARCHIVE
+                or f.restore_status
+                or f.deleted_at):
+            continue
         try:
             _s3().restore_object(
                 Bucket=settings.DRIVE_BUCKET_NAME,
@@ -843,15 +836,14 @@ def bulk_restore(request):
             )
         except ClientError as e:
             code = e.response["Error"]["Code"]
-            logger.error("bulk restore_object failed file=%s code=%s", f.pk, code)
+            logger.error("bulk restore_object failed file=%s code=%s", f.file_id, code)
             if code != "RestoreAlreadyInProgress":
                 continue
 
-        f.restore_status       = DriveFile.RESTORE_PENDING
-        f.restore_notify_email = user_email
-        f.save(update_fields=["restore_status", "restore_notify_email"])
+        dal.update_file_restore(f.file_id, DriveFile.RESTORE_PENDING, notify_email=user_email)
+        f.restore_status = DriveFile.RESTORE_PENDING
         html = render(request, "drive/partials/file_row.html", {"file": f}).content.decode()
-        updated_html.append({"id": f.id, "html": html})
+        updated_html.append({"id": f.file_id, "html": html})
         restored_names.append(f.name)
 
     if user_email and restored_names:
@@ -863,26 +855,64 @@ def bulk_restore(request):
     return JsonResponse({"updated": updated_html})
 
 
+@cognito_login_required
+@require_POST
+def restore_file(request, pk):
+    owner_sub = _get_owner_sub(request)
+    file = _require_file(pk, owner_sub)
+
+    if not file.is_archived():
+        return JsonResponse({"error": "File is not archived"}, status=400)
+    if file.restore_status == DriveFile.RESTORE_PENDING:
+        return JsonResponse({"error": "Restore already in progress"}, status=400)
+
+    user_email = request.session.get("user_email", "")
+    try:
+        _s3().restore_object(
+            Bucket=settings.DRIVE_BUCKET_NAME,
+            Key=file.s3_key,
+            RestoreRequest={"Days": 7, "GlacierJobParameters": {"Tier": "Standard"}},
+        )
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        logger.error("restore_object failed code=%s err=%s", code, e)
+        if code != "RestoreAlreadyInProgress":
+            return JsonResponse({"error": str(e)}, status=400)
+
+    dal.update_file_restore(file.file_id, DriveFile.RESTORE_PENDING, notify_email=user_email)
+    file.restore_status = DriveFile.RESTORE_PENDING
+
+    if user_email:
+        try:
+            _send_restore_started_email(user_email, file.name)
+        except Exception as email_err:
+            logger.error("restore email failed: %s", email_err, exc_info=True)
+
+    html = render(request, "drive/partials/file_row.html", {"file": file}).content.decode()
+    return HttpResponse(html, content_type="text/html")
+
+
+# ---------------------------------------------------------------------------
+# Email helpers (Resend — restore / archive notifications only)
+# ---------------------------------------------------------------------------
+
 def _send_bulk_restore_email(to_email, file_names):
     resend.api_key = _get_resend_api_key()
     count = len(file_names)
-    noun  = "file" if count == 1 else "files"
+    noun = "file" if count == 1 else "files"
     file_list_html = "".join(
-        f'<li style="padding:4px 0;color:#cbd5e1;">{name}</li>'
-        for name in file_names
+        f'<li style="padding:4px 0;color:#cbd5e1;">{name}</li>' for name in file_names
     )
     html_body = f"""
     <div style="font-family:sans-serif;max-width:560px;margin:0 auto;background:#0f172a;padding:32px;border-radius:12px;">
         <h2 style="color:#f1f5f9;margin-top:0;">NovaDrive — Restore Started</h2>
-        <p style="color:#94a3b8;">
-            {count} {noun} are being restored from Glacier Deep Archive:
-        </p>
+        <p style="color:#94a3b8;">{count} {noun} are being restored from Glacier Deep Archive:</p>
         <ul style="background:#1e293b;border-radius:8px;padding:16px 16px 16px 32px;margin:16px 0;">
             {file_list_html}
         </ul>
         <p style="color:#94a3b8;">
             Retrieval typically takes <strong style="color:#f1f5f9;">12–48 hours</strong>.
-            We'll send you another email as soon as your {noun} {"is" if count == 1 else "are"} ready to download.
+            We'll send you another email as soon as your {noun} {"is" if count == 1 else "are"} ready.
         </p>
         <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;">
         <p style="color:#475569;font-size:12px;margin:0;">NovaDrive &nbsp;·&nbsp; nodepulsecaringal.xyz</p>
@@ -896,49 +926,6 @@ def _send_bulk_restore_email(to_email, file_names):
     })
 
 
-@cognito_login_required
-@require_POST
-def restore_file(request, pk):
-    """Initiate a Glacier restore and notify the user when it's ready."""
-    file = get_object_or_404(DriveFile, pk=pk, owner_sub=_get_owner_sub(request))
-
-    if not file.is_archived():
-        return JsonResponse({"error": "File is not archived"}, status=400)
-
-    if file.restore_status == DriveFile.RESTORE_PENDING:
-        return JsonResponse({"error": "Restore already in progress"}, status=400)
-
-    user_email = request.session.get("user_email", "")
-
-    try:
-        _s3().restore_object(
-            Bucket=settings.DRIVE_BUCKET_NAME,
-            Key=file.s3_key,
-            RestoreRequest={
-                "Days": 7,
-                "GlacierJobParameters": {"Tier": "Standard"},
-            },
-        )
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        logger.error("restore_object failed code=%s err=%s", code, e)
-        if code != "RestoreAlreadyInProgress":
-            return JsonResponse({"error": str(e)}, status=400)
-
-    file.restore_status       = DriveFile.RESTORE_PENDING
-    file.restore_notify_email = user_email
-    file.save(update_fields=["restore_status", "restore_notify_email"])
-
-    if user_email:
-        try:
-            _send_restore_started_email(user_email, file.name)
-        except Exception as email_err:
-            logger.error("restore email failed: %s", email_err, exc_info=True)
-
-    html = render(request, "drive/partials/file_row.html", {"file": file}).content.decode()
-    return HttpResponse(html, content_type="text/html")
-
-
 def _send_restore_started_email(to_email, file_name):
     resend.api_key = _get_resend_api_key()
     html_body = f"""
@@ -950,7 +937,7 @@ def _send_restore_started_email(to_email, file_name):
         </div>
         <p style="color:#94a3b8;">
             Glacier Deep Archive retrieval typically takes <strong style="color:#f1f5f9;">12–48 hours</strong>.
-            We'll send you another email as soon as your file is ready to download.
+            We'll send you another email as soon as your file is ready.
         </p>
         <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;">
         <p style="color:#475569;font-size:12px;margin:0;">NovaDrive &nbsp;·&nbsp; nodepulsecaringal.xyz</p>
@@ -965,34 +952,27 @@ def _send_restore_started_email(to_email, file_name):
 
 
 def _send_archive_email(to_email, file_names):
-    """Send a Resend email confirming files were moved to Glacier Deep Archive."""
     resend.api_key = _get_resend_api_key()
-
-    file_list_html = "".join(
-        f'<li style="padding:4px 0;color:#cbd5e1;">{name}</li>'
-        for name in file_names
-    )
     count = len(file_names)
-    noun  = "file" if count == 1 else "files"
-
+    noun = "file" if count == 1 else "files"
+    file_list_html = "".join(
+        f'<li style="padding:4px 0;color:#cbd5e1;">{name}</li>' for name in file_names
+    )
     html_body = f"""
     <div style="font-family:sans-serif;max-width:560px;margin:0 auto;background:#0f172a;padding:32px;border-radius:12px;">
         <h2 style="color:#f1f5f9;margin-top:0;">NovaDrive — Archive Confirmation</h2>
-        <p style="color:#94a3b8;">
-            {count} {noun} have been moved to <strong style="color:#a78bfa;">Glacier Deep Archive</strong>.
-        </p>
+        <p style="color:#94a3b8;">{count} {noun} have been moved to <strong style="color:#a78bfa;">Glacier Deep Archive</strong>.</p>
         <ul style="background:#1e293b;border-radius:8px;padding:16px 16px 16px 32px;margin:16px 0;">
             {file_list_html}
         </ul>
         <p style="color:#64748b;font-size:13px;">
-            Archived files cannot be previewed or downloaded directly. To restore them,
-            you will need to initiate a Glacier restore request (retrieval time: 12–48 hours).
+            Archived files cannot be previewed or downloaded directly.
+            To restore them, initiate a Glacier restore request (retrieval: 12–48 hours).
         </p>
         <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;">
         <p style="color:#475569;font-size:12px;margin:0;">NovaDrive &nbsp;·&nbsp; nodepulsecaringal.xyz</p>
     </div>
     """
-
     resend.Emails.send({
         "from": settings.DRIVE_FROM_EMAIL,
         "to": [to_email],
@@ -1002,70 +982,49 @@ def _send_archive_email(to_email, file_names):
 
 
 # ---------------------------------------------------------------------------
-# Batch zip-folder
+# Batch zip-folder download
 # ---------------------------------------------------------------------------
 
 INLINE_ZIP_THRESHOLD = 0  # Always use Batch — Lambda timeout too short for inline zipping
 
 
 def _collect_folder_files(folder_pk, owner_sub):
-    """
-    Iteratively walk the folder tree and return a list of (DriveFile, arc_path) tuples.
-    Only non-archived, non-deleted files are included (archived files can't be read from S3).
-    arc_path is the relative path inside the zip (e.g. "subfolder/file.jpg").
-    """
-    accessible = (DriveFile.GLACIER_IR,)
     result = []
-    queue = [(folder_pk, "")]  # (folder_pk, path_prefix)
+    queue = [(folder_pk, "")]
     visited = set()
-
     while queue:
         fk, prefix = queue.pop(0)
         if fk in visited:
             continue
         visited.add(fk)
-
-        for sf in DriveFolder.objects.filter(parent_id=fk, owner_sub=owner_sub, deleted_at__isnull=True):
+        for sf in dal.list_subfolders(owner_sub, fk, active_only=True):
             child_prefix = f"{prefix}/{sf.name}" if prefix else sf.name
-            queue.append((sf.pk, child_prefix))
-
-        for f in DriveFile.objects.filter(
-            folder_id=fk, owner_sub=owner_sub,
-            deleted_at__isnull=True, storage_class__in=accessible,
-        ):
-            arc_path = f"{prefix}/{f.name}" if prefix else f.name
-            result.append((f, arc_path))
-
+            queue.append((sf.folder_id, child_prefix))
+        for f in dal.list_files_in_folder(fk, active_only=True):
+            if f.owner_sub == owner_sub and f.storage_class == DriveFile.GLACIER_IR:
+                arc_path = f"{prefix}/{f.name}" if prefix else f.name
+                result.append((f, arc_path))
     return result
 
 
 def _folder_total_size(folder_pk, owner_sub):
-    """Sum of accessible file sizes in the entire folder tree."""
-    accessible = (DriveFile.GLACIER_IR,)
     queue = [folder_pk]
     visited = set()
-    folder_pks = []
-
+    total = 0
     while queue:
         fk = queue.pop()
         if fk in visited:
             continue
         visited.add(fk)
-        folder_pks.append(fk)
-        queue.extend(
-            DriveFolder.objects.filter(parent_id=fk, owner_sub=owner_sub, deleted_at__isnull=True)
-                        .values_list("pk", flat=True)
-        )
-
-    total = DriveFile.objects.filter(
-        folder_id__in=folder_pks, owner_sub=owner_sub,
-        deleted_at__isnull=True, storage_class__in=accessible,
-    ).aggregate(total=Sum("size"))["total"] or 0
+        for sf in dal.list_subfolders(owner_sub, fk, active_only=True):
+            queue.append(sf.folder_id)
+        for f in dal.list_files_in_folder(fk, active_only=True):
+            if f.owner_sub == owner_sub and f.storage_class == DriveFile.GLACIER_IR:
+                total += f.size
     return total
 
 
 def _zip_and_upload(folder_pk, owner_sub, s3_client, bucket):
-    """Zip all accessible files in folder tree, upload to temp-zips/, return S3 key."""
     import io, zipfile
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1085,12 +1044,6 @@ def _zip_and_upload(folder_pk, owner_sub, s3_client, bucket):
 @cognito_login_required
 @require_POST
 def zip_folder(request, pk=None):
-    """
-    Zip one or more folders for download.
-    Each folder gets its own independent Batch job so they run in parallel.
-    Accepts JSON body: { "folder_ids": [1, 2, 3] } or falls back to URL pk.
-    Returns: { "jobs": [{ "job_id": N, "folder_name": "..." }, ...] }
-    """
     owner_sub = _get_owner_sub(request)
     bucket = settings.DRIVE_BUCKET_NAME
 
@@ -1103,54 +1056,51 @@ def zip_folder(request, pk=None):
     if not folder_ids:
         return JsonResponse({"error": "No folders specified"}, status=400)
 
-    folders = list(DriveFolder.objects.filter(pk__in=folder_ids, owner_sub=owner_sub, deleted_at__isnull=True))
+    folders = [dal.get_folder(fid) for fid in folder_ids]
+    folders = [f for f in folders if f and f.owner_sub == owner_sub and not f.deleted_at]
     if len(folders) != len(folder_ids):
         return JsonResponse({"error": "One or more folders not found"}, status=404)
 
-    batch = boto3.client("batch", region_name=settings.AWS_REGION)
+    batch_client = boto3.client("batch", region_name=settings.AWS_REGION)
     submitted = []
 
     for folder in folders:
-        batch_job = BatchJob.objects.create(
-            type="zip_folder",
-            owner_sub=owner_sub,
-            folder_name=folder.name,
-            status=BatchJob.PENDING,
-        )
+        batch_job = dal.create_batch_job(owner_sub, "zip_folder", folder.name)
         try:
-            response = batch.submit_job(
-                jobName=f"zip-folder-{folder.pk}-{batch_job.pk}",
+            response = batch_client.submit_job(
+                jobName=f"zip-folder-{folder.folder_id[:8]}-{batch_job.job_id[:8]}",
                 jobQueue=settings.BATCH_JOB_QUEUE,
                 jobDefinition=settings.BATCH_JOB_DEFINITION,
                 containerOverrides={
                     "environment": [
-                        {"name": "JOB_TYPE",              "value": "zip_folder"},
-                        {"name": "FOLDER_IDS",            "value": str(folder.pk)},
-                        {"name": "OWNER_SUB",             "value": owner_sub},
-                        {"name": "JOB_DB_ID",             "value": str(batch_job.pk)},
-                        {"name": "DRIVE_BUCKET_NAME",     "value": bucket},
-                        {"name": "AWS_REGION",            "value": settings.AWS_REGION},
-                        {"name": "SSM_DATABASE_URL_NAME", "value": os.environ.get("SSM_DATABASE_URL_NAME", "")},
+                        {"name": "JOB_TYPE",                "value": "zip_folder"},
+                        {"name": "FOLDER_IDS",              "value": folder.folder_id},
+                        {"name": "OWNER_SUB",               "value": owner_sub},
+                        {"name": "JOB_DB_ID",               "value": batch_job.job_id},
+                        {"name": "DRIVE_BUCKET_NAME",       "value": bucket},
+                        {"name": "AWS_REGION",              "value": settings.AWS_REGION},
+                        {"name": "DYNAMODB_FOLDERS_TABLE",  "value": os.environ.get("DYNAMODB_FOLDERS_TABLE", "")},
+                        {"name": "DYNAMODB_FILES_TABLE",    "value": os.environ.get("DYNAMODB_FILES_TABLE", "")},
+                        {"name": "DYNAMODB_BATCH_JOBS_TABLE", "value": os.environ.get("DYNAMODB_BATCH_JOBS_TABLE", "")},
                     ]
                 },
             )
-            batch_job.job_id = response["jobId"]
-            batch_job.save(update_fields=["job_id"])
-            submitted.append({"job_id": batch_job.pk, "folder_name": folder.name})
+            dal.set_batch_job_aws_id(batch_job.job_id, response["jobId"])
+            submitted.append({"job_id": batch_job.job_id, "folder_name": folder.name})
         except Exception as e:
-            logger.error("batch submit failed folder=%s: %s", folder.pk, e)
-            batch_job.status = BatchJob.FAILED
-            batch_job.save(update_fields=["status"])
-            submitted.append({"job_id": batch_job.pk, "folder_name": folder.name, "error": str(e)})
+            logger.error("batch submit failed folder=%s: %s", folder.folder_id, e)
+            dal.set_batch_job_failed(batch_job.job_id)
+            submitted.append({"job_id": batch_job.job_id, "folder_name": folder.name, "error": str(e)})
 
     return JsonResponse({"status": "pending", "jobs": submitted})
 
 
 @cognito_login_required
 def job_status(request, job_id):
-    """Poll the status of a batch job. Returns presigned URL when ready."""
     owner_sub = _get_owner_sub(request)
-    job = get_object_or_404(BatchJob, pk=job_id, owner_sub=owner_sub)
+    job = dal.get_batch_job(job_id)
+    if not job or job.owner_sub != owner_sub:
+        raise Http404
 
     if job.status == BatchJob.READY:
         url = _s3().generate_presigned_url(
@@ -1167,30 +1117,28 @@ def job_status(request, job_id):
     return JsonResponse({"status": job.status, "progress": job.progress})
 
 
+# ---------------------------------------------------------------------------
+# Timeline (Photos view)
+# ---------------------------------------------------------------------------
+
 @cognito_login_required
 def timeline_view(request):
-    """Google Photos-style timeline: all media grouped by capture/upload date, newest first."""
-    import itertools
-    from django.db.models import Q, Prefetch
-    from django.db.models.functions import Coalesce
-
     owner_sub = _get_owner_sub(request)
 
-    media = list(
-        DriveFile.objects.filter(
-            owner_sub=owner_sub,
-            deleted_at__isnull=True,
-        ).filter(
-            Q(content_type__startswith="image/") | Q(content_type__startswith="video/")
-        ).filter(
-            Q(storage_class=DriveFile.GLACIER_IR)
-            | Q(storage_class=DriveFile.DEEP_ARCHIVE, restore_status=DriveFile.RESTORE_READY)
-        ).annotate(
-            effective_date=Coalesce("captured_at", "uploaded_at")
-        ).order_by("-effective_date")
+    all_files = dal.list_all_files(owner_sub)
+    media = [
+        f for f in all_files
+        if not f.deleted_at
+        and (f.content_type.startswith("image/") or f.content_type.startswith("video/"))
+        and (f.storage_class == DriveFile.GLACIER_IR
+             or (f.storage_class == DriveFile.DEEP_ARCHIVE
+                 and f.restore_status == DriveFile.RESTORE_READY))
+    ]
+    media.sort(
+        key=lambda f: f.effective_date or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        reverse=True,
     )
 
-    # Group by calendar date (effective_date already set per file)
     def _date_key(f):
         return f.effective_date.date() if f.effective_date else datetime.date.min
 
@@ -1199,30 +1147,22 @@ def timeline_view(request):
         for date, files in itertools.groupby(media, key=_date_key)
     ]
 
-    active_subfolders = DriveFolder.objects.filter(deleted_at__isnull=True)
-    sidebar_folders = DriveFolder.objects.filter(
-        owner_sub=owner_sub, parent=None, deleted_at__isnull=True
-    ).prefetch_related(
-        Prefetch('subfolders', queryset=active_subfolders),
-        Prefetch('subfolders__subfolders', queryset=active_subfolders),
-        Prefetch('subfolders__subfolders__subfolders', queryset=active_subfolders),
-    )
+    active_files = [f for f in all_files if not f.deleted_at]
     _, storage_used, storage_pct = _storage_stats(owner_sub)
-    total_files = DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True).count()
 
     ctx = {
-        "groups": groups,
-        "total_media": len(media),
+        "groups":         groups,
+        "total_media":    len(media),
         "is_timeline_view": True,
-        "sidebar_folders": sidebar_folders,
-        "storage_used": storage_used,
-        "storage_pct": storage_pct,
-        "total_files": total_files,
-        "files": DriveFile.objects.filter(owner_sub=owner_sub, deleted_at__isnull=True),
-        "subfolders": DriveFolder.objects.none(),
+        "sidebar_folders": _build_sidebar_tree(owner_sub),
+        "storage_used":   storage_used,
+        "storage_pct":    storage_pct,
+        "total_files":    len(active_files),
+        "files":          active_files,
+        "subfolders":     [],
         "current_folder": None,
-        "breadcrumbs": [],
-        "search_query": "",
+        "breadcrumbs":    [],
+        "search_query":   "",
     }
 
     response = render(request, "drive/home.html", ctx)

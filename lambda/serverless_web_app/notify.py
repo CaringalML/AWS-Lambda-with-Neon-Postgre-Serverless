@@ -2,17 +2,16 @@
 Lambda handler for S3 ObjectRestore:Completed events.
 
 Triggered by S3 → Lambda notification when a Glacier restore finishes.
-Looks up the file in the DB, sends a "ready to download" email via Resend,
+Looks up the file in DynamoDB, sends a "ready to download" email via Resend,
 and updates the restore_status to 'ready'.
 """
 import json
 import os
+from datetime import datetime, timezone, timedelta
 from urllib.parse import unquote_plus
 
 import boto3
-import psycopg2
 import resend
-from urllib.parse import urlparse
 
 
 def handler(event, context):
@@ -25,69 +24,57 @@ def handler(event, context):
         try:
             _handle_restore_completed(s3_key)
         except Exception as e:
-            # Log but do not re-raise — prevents Lambda from retrying and
-            # sending duplicate "ready" emails on transient failures.
             print(f"[ERROR] notify handler failed for key={s3_key}: {e}")
 
 
 def _handle_restore_completed(s3_key):
-    region      = os.environ.get("AWS_REGION", "ap-southeast-2")
-    ssm         = boto3.client("ssm", region_name=region)
+    region     = os.environ.get("AWS_REGION", "ap-southeast-2")
+    table_name = os.environ["DYNAMODB_FILES_TABLE"]
 
-    db_url = ssm.get_parameter(
-        Name=os.environ["SSM_DATABASE_URL_NAME"], WithDecryption=True
-    )["Parameter"]["Value"]
+    ddb   = boto3.resource("dynamodb", region_name=region)
+    table = ddb.Table(table_name)
 
-    resend_key = ssm.get_parameter(
-        Name=os.environ["SSM_RESEND_API_KEY_NAME"], WithDecryption=True
-    )["Parameter"]["Value"]
-
-    parsed   = urlparse(db_url)
-    conn     = psycopg2.connect(
-        host=parsed.hostname,
-        port=parsed.port or 5432,
-        dbname=parsed.path.lstrip("/"),
-        user=parsed.username,
-        password=parsed.password,
-        sslmode="require",
+    resp  = table.query(
+        IndexName="s3key-index",
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("s3_key").eq(s3_key),
+        Limit=1,
     )
+    items = resp.get("Items", [])
+    if not items:
+        return
 
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, name, restore_notify_email, restore_status FROM drive_drivefile WHERE s3_key = %s",
-                    (s3_key,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return
+    item         = items[0]
+    file_id      = item["file_id"]
+    file_name    = item.get("name", "")
+    notify_email = item.get("restore_notify_email", "")
+    restore_status = item.get("restore_status", "")
 
-                file_id, file_name, notify_email, restore_status = row
+    if restore_status == "ready":
+        return
 
-                # Already processed on a previous attempt — skip to avoid duplicate email
-                if restore_status == "ready":
-                    return
-
-                cur.execute(
-                    "UPDATE drive_drivefile SET restore_status = 'ready', "
-                    "restore_expires_at = NOW() + INTERVAL '7 days' WHERE id = %s",
-                    (file_id,),
-                )
-    finally:
-        conn.close()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    table.update_item(
+        Key={"file_id": file_id},
+        UpdateExpression="SET restore_status = :rs, restore_expires_at = :re",
+        ExpressionAttributeValues={":rs": "ready", ":re": expires_at},
+    )
 
     if not notify_email:
         return
 
+    ssm = boto3.client("ssm", region_name=region)
+    resend_key = ssm.get_parameter(
+        Name=os.environ["SSM_RESEND_API_KEY_NAME"], WithDecryption=True
+    )["Parameter"]["Value"]
+
     resend.api_key = resend_key
-    from_email     = os.environ.get("DRIVE_FROM_EMAIL", "drive@nodepulsecaringal.xyz")
+    from_email     = os.environ.get("DRIVE_FROM_EMAIL", "noreply@nodepulsecaringal.xyz")
 
     resend.Emails.send({
-        "from": from_email,
-        "to": [notify_email],
+        "from":    from_email,
+        "to":      [notify_email],
         "subject": f'NovaDrive: "{file_name}" is ready to download',
-        "html": _build_ready_email(file_name),
+        "html":    _build_ready_email(file_name),
     })
 
 

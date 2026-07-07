@@ -22,7 +22,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Allow Lambda to read the database credentials from SSM Parameter Store
+# Allow Lambda to decrypt SSM SecureString parameters
 resource "aws_iam_role_policy" "lambda_ssm" {
   name = "${var.lambda_function_name}-${var.environment}-ssm-policy"
   role = aws_iam_role.lambda_role.id
@@ -30,11 +30,6 @@ resource "aws_iam_role_policy" "lambda_ssm" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
-        Resource = aws_ssm_parameter.database_url.arn
-      },
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt"]

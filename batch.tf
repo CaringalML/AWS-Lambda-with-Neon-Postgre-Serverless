@@ -82,22 +82,27 @@ resource "aws_iam_role_policy" "batch_job_s3" {
   })
 }
 
-resource "aws_iam_role_policy" "batch_job_ssm" {
-  name = "${var.lambda_function_name}-batch-job-ssm-${var.environment}"
+resource "aws_iam_role_policy" "batch_job_dynamodb" {
+  name = "${var.lambda_function_name}-batch-job-dynamodb-${var.environment}"
   role = aws_iam_role.batch_job.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
-        Resource = aws_ssm_parameter.database_url.arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["kms:Decrypt"]
-        Resource = "*"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:Query",
+        ]
+        Resource = [
+          aws_dynamodb_table.folders.arn,
+          "${aws_dynamodb_table.folders.arn}/index/*",
+          aws_dynamodb_table.files.arn,
+          "${aws_dynamodb_table.files.arn}/index/*",
+          aws_dynamodb_table.batch_jobs.arn,
+        ]
       }
     ]
   })

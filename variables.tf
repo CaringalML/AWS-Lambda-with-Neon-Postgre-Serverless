@@ -16,12 +16,6 @@ variable "environment" {
   default     = "dev"
 }
 
-variable "database_url" {
-  description = "Neon Postgres connection string (set via TF_VAR_database_url in GitHub secrets)"
-  type        = string
-  sensitive   = true
-}
-
 variable "custom_domain" {
   description = "Custom domain for the app (e.g. drive.nodepulsecaringal.xyz)"
   type        = string

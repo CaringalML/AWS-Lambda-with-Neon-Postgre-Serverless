@@ -20,7 +20,6 @@ resource "aws_lambda_function" "serverless_web_app" {
       ENVIRONMENT            = var.environment
       DJANGO_SETTINGS_MODULE = "config.settings.prod"
       # DB credentials fetched from SSM at runtime — not stored as plain text here
-      SSM_DATABASE_URL_NAME  = aws_ssm_parameter.database_url.name
       # Single-admin auth
       ADMIN_EMAIL              = var.cognito_admin_email
       SSM_ADMIN_PASSWORD_NAME  = aws_ssm_parameter.admin_password.name
@@ -67,8 +66,8 @@ resource "aws_lambda_function" "notify" {
 
   environment {
     variables = {
-      AWS_REGION_NAME         = var.aws_region
-      SSM_DATABASE_URL_NAME   = aws_ssm_parameter.database_url.name
+      AWS_REGION              = var.aws_region
+      DYNAMODB_FILES_TABLE    = aws_dynamodb_table.files.name
       SSM_RESEND_API_KEY_NAME = aws_ssm_parameter.resend_api_key.name
       DRIVE_FROM_EMAIL        = "noreply@nodepulsecaringal.xyz"
       DRIVE_URL               = "https://${var.custom_domain}/drive/"

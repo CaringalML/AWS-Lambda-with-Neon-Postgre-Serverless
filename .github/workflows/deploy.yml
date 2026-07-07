@@ -50,13 +50,6 @@ jobs:
             pip install -r "$LAMBDA_DIR/requirements.txt" --upgrade --no-cache-dir
           fi
 
-      - name: Run database migrations
-        working-directory: lambda/serverless_web_app
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DJANGO_SETTINGS_MODULE: config.settings.prod
-        run: python manage.py migrate --noinput
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -68,7 +61,6 @@ jobs:
       - name: Terraform Plan
         id: plan
         env:
-          TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
           TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
           TF_VAR_cognito_admin_email: ${{ secrets.ADMIN_EMAIL }}
           TF_VAR_cognito_admin_password: ${{ secrets.ADMIN_PASSWORD }}
@@ -117,7 +109,6 @@ jobs:
       - name: Terraform Apply
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
-          TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
           TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
           TF_VAR_cognito_admin_email: ${{ secrets.ADMIN_EMAIL }}
           TF_VAR_cognito_admin_password: ${{ secrets.ADMIN_PASSWORD }}
