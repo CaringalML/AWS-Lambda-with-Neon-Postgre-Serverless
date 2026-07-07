@@ -36,6 +36,10 @@ resource "aws_lambda_function" "serverless_web_app" {
       DRIVE_FROM_EMAIL                = "drive@nodepulsecaringal.xyz"
       BATCH_JOB_QUEUE                 = aws_batch_job_queue.novadrive.name
       BATCH_JOB_DEFINITION            = aws_batch_job_definition.zip_folder.name
+      # DynamoDB tables
+      DYNAMODB_FOLDERS_TABLE          = aws_dynamodb_table.folders.name
+      DYNAMODB_FILES_TABLE            = aws_dynamodb_table.files.name
+      DYNAMODB_BATCH_JOBS_TABLE       = aws_dynamodb_table.batch_jobs.name
     }
   }
 
