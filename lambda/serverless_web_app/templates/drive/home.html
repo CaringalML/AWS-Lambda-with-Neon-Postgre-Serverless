@@ -783,11 +783,22 @@ document.addEventListener('alpine:init', () => {
             // latency varies), and a stale "meg" response landing after the
             // cleared-input response would overwrite the restored listing.
             const seq = ++this._searchSeq;
+            const term = q.trim();
+            const cacheKey = url + '|' + term;
+            const cached = this._searchCache[cacheKey];
+            if (cached && Date.now() - cached.t < this._SEARCH_CACHE_MS) {
+                // Repeat query within 30s — serve from cache, no request
+                const el = document.getElementById('search-results');
+                if (el) el.innerHTML = cached.html;
+                this.searching = false;
+                return;
+            }
             this.searching = true;
-            const qs = q.trim() ? '?q=' + encodeURIComponent(q.trim()) : '';
+            const qs = term ? '?q=' + encodeURIComponent(term) : '';
             fetch(url + qs, { headers: { 'HX-Request': 'true' } })
                 .then(r => r.text())
                 .then(html => {
+                    this._searchCache[cacheKey] = { html, t: Date.now() };
                     if (seq !== this._searchSeq) return; // superseded by a newer keystroke
                     const el = document.getElementById('search-results');
                     if (el) el.innerHTML = html;
@@ -800,6 +811,8 @@ document.addEventListener('alpine:init', () => {
         },
         _searchSeq: 0,
         searching: false,
+        _searchCache: {},
+        _SEARCH_CACHE_MS: 30 * 1000,
     }));
 });
 </script>
