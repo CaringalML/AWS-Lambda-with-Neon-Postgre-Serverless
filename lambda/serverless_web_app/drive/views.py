@@ -549,8 +549,10 @@ def get_file_url(request, pk):
         # instead of the multi-MB original; download still uses the original.
         preview = _preview_key(file.s3_key)
         try:
-            _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=preview)
-            target_key = preview
+            head = _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=preview)
+            if not head.get("Metadata", {}).get("nova-placeholder"):
+                target_key = preview
+            # placeholder → un-thumbnailable file; serve original, don't re-invoke
         except ClientError:
             _request_thumbnail(file.s3_key)  # backfill; serve original this once
     signed_url = _get_cloudfront_signed_url(target_key, expires_seconds=3600)
@@ -580,7 +582,10 @@ def file_thumbnail(request, pk):
         # servable even while the original sits in Deep Archive.
         thumb = _thumb_key(file.s3_key)
         try:
-            _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=thumb)
+            head = _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=thumb)
+            if head.get("Metadata", {}).get("nova-placeholder"):
+                # Known-unthumbable — icon fallback via onerror, no re-invoke
+                return HttpResponse(status=404)
             signed_url = _get_cloudfront_signed_url(thumb, expires_seconds=3600)
         except ClientError:
             # No thumb yet (uploaded before the thumbnailer existed, or

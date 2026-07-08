@@ -12,6 +12,7 @@ from urllib.parse import unquote_plus
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 import resend
 
 
@@ -21,16 +22,34 @@ def handler(event, context):
         if "ObjectRestore:Completed" not in event_name:
             continue
 
+        bucket = record["s3"]["bucket"]["name"]
         s3_key = unquote_plus(record["s3"]["object"]["key"])
         try:
-            _handle_restore_completed(s3_key)
+            _handle_restore_completed(bucket, s3_key)
         except Exception as e:
             print(f"[ERROR] notify handler failed for key={s3_key}: {e}")
 
 
-def _handle_restore_completed(s3_key):
+def _drop_placeholder_derivatives(bucket, s3_key, region):
+    """The original is readable again — remove placeholder thumbs/previews
+    (written while it sat in Deep Archive) so the next browse regenerates
+    real derivatives. Real derivatives are left untouched."""
+    s3 = boto3.client("s3", region_name=region)
+    for prefix in ("thumbs/", "previews/"):
+        dkey = f"{prefix}{s3_key}.webp"
+        try:
+            head = s3.head_object(Bucket=bucket, Key=dkey)
+            if head.get("Metadata", {}).get("nova-placeholder"):
+                s3.delete_object(Bucket=bucket, Key=dkey)
+        except ClientError:
+            pass
+
+
+def _handle_restore_completed(bucket, s3_key):
     region     = os.environ.get("AWS_REGION", "ap-southeast-2")
     table_name = os.environ["DYNAMODB_FILES_TABLE"]
+
+    _drop_placeholder_derivatives(bucket, s3_key, region)
 
     ddb   = boto3.resource("dynamodb", region_name=region)
     table = ddb.Table(table_name)
