@@ -300,16 +300,49 @@ document.addEventListener('alpine:init', () => {
             this._previewIdx = this._previewList.indexOf(pk);
             await this._loadPreview(pk);
         },
+        // Signed-URL response cache — our URLs are stable for ≥1h (rounded
+        // expiry windows), so 45 min is a safe reuse horizon.
+        _urlCache: {},
+        _URL_CACHE_MS: 45 * 60 * 1000,
+        _fetchFileData(pk) {
+            const c = this._urlCache[pk];
+            if (c && Date.now() - c.t < this._URL_CACHE_MS) return c.p;
+            const p = fetch(`/drive/view/${pk}/url/`, { headers: { 'X-CSRFToken': this.csrf() } })
+                .then(r => r.json());
+            this._urlCache[pk] = { p, t: Date.now() };
+            return p;
+        },
         async _loadPreview(pk) {
-            this.preview = { loading: true, name: '', url: '', content_type: '', size: '', pk };
+            // Only blank the modal when we genuinely have to wait
+            if (!this._urlCache[pk]) {
+                this.preview = { loading: true, name: '', url: '', content_type: '', size: '', pk };
+            }
             try {
-                const resp = await fetch(`/drive/view/${pk}/url/`, { headers: { 'X-CSRFToken': this.csrf() } });
-                const data = await resp.json();
-                if (data.error) { alert(data.message || data.error); this.preview = null; return; }
+                const data = await this._fetchFileData(pk);
+                if (data.error) {
+                    delete this._urlCache[pk];
+                    alert(data.message || data.error); this.preview = null; return;
+                }
                 this.preview = { ...data, loading: false, pk };
+                this._prefetchNeighbors();
             } catch (err) {
+                delete this._urlCache[pk];
                 alert('Could not load preview: ' + err.message);
                 this.preview = null;
+            }
+        },
+        // Facebook-style: while viewing photo N, fetch URLs for N±1 and warm
+        // the browser cache so arrow navigation is instant.
+        _prefetchNeighbors() {
+            const n = this._previewList.length;
+            if (n <= 1 || this._previewIdx < 0) return;
+            for (const off of [1, -1]) {
+                const pk = this._previewList[(this._previewIdx + off + n) % n];
+                this._fetchFileData(pk).then(d => {
+                    if (d && !d.error && (d.content_type || '').startsWith('image/')) {
+                        new Image().src = d.url;
+                    }
+                }).catch(() => {});
             }
         },
         prevFile() {
