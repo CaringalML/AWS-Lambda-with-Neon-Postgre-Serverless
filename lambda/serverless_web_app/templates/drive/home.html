@@ -1313,13 +1313,10 @@ document.addEventListener('alpine:init', () => {
             <div class="relative">
                 <div x-show="searching" x-cloak
                      class="absolute inset-0 z-20 flex items-start justify-center pt-24">
-                    <div class="flex items-center gap-3 bg-[#1a1d27] border border-zinc-700/60 rounded-xl px-5 py-3 shadow-xl shadow-black/40">
-                        <svg class="animate-spin w-5 h-5 text-sky-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                        </svg>
-                        <span class="text-sm text-zinc-300 font-medium">Searching&hellip;</span>
-                    </div>
+                    <svg class="animate-spin w-10 h-10 text-sky-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                    </svg>
                 </div>
                 <div id="search-results" :class="searching ? 'opacity-40 pointer-events-none' : ''" class="transition-opacity duration-150">
                     {% include "drive/partials/search_results.html" %}
