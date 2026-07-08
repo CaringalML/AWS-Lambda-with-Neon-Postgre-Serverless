@@ -779,15 +779,21 @@ document.addEventListener('alpine:init', () => {
                 });
                 return;
             }
-            const qs = q ? '?q=' + encodeURIComponent(q) : '';
+            // Sequence guard: keystrokes can resolve out of order (Lambda
+            // latency varies), and a stale "meg" response landing after the
+            // cleared-input response would overwrite the restored listing.
+            const seq = ++this._searchSeq;
+            const qs = q.trim() ? '?q=' + encodeURIComponent(q.trim()) : '';
             fetch(url + qs, { headers: { 'HX-Request': 'true' } })
                 .then(r => r.text())
                 .then(html => {
+                    if (seq !== this._searchSeq) return; // superseded by a newer keystroke
                     const el = document.getElementById('search-results');
                     if (el) el.innerHTML = html;
                 })
                 .catch(err => console.error('Search failed:', err));
         },
+        _searchSeq: 0,
     }));
 });
 </script>
