@@ -9,7 +9,8 @@
      @contextmenu.stop="{% if not is_archive_view %}openCtx($event, '{{ file.pk }}', {{ file.is_archived|yesno:'true,false' }}, '{{ file.restore_status }}', $el.dataset.name){% endif %}">
 
     {# ── LIST view ── #}
-    <div x-show="view === 'list'" class="flex items-center gap-4 px-5 py-3 pointer-events-none">
+    {% if view_mode != 'grid' %}
+    <div class="flex items-center gap-4 px-5 py-3 pointer-events-none">
 
         <div class="w-4 h-4 shrink-0 flex items-center justify-center">
             <div class="w-3 h-3 rounded-full border-2 transition-all duration-100"
@@ -83,10 +84,11 @@
         {% endif %}
     </div>
 
+    {% else %}
     {# ── GRID view ── #}
     {% if file.content_type|slice:":6" == "image/" or file.content_type|slice:":6" == "video/" %}
     {# Image/video: full-card thumbnail, info overlaid at bottom #}
-    <div x-show="view === 'grid'" style="display:none" class="relative pointer-events-none">
+    <div class="relative pointer-events-none">
 
         {# Selection dot + restore badge row #}
         <div class="absolute top-2 left-2 z-10">
@@ -140,7 +142,7 @@
 
     {% else %}
     {# Non-image: standard card layout #}
-    <div x-show="view === 'grid'" style="display:none" class="flex flex-col p-4 gap-3 pointer-events-none">
+    <div class="flex flex-col p-4 gap-3 pointer-events-none">
 
         <div class="flex items-start justify-between">
             <div class="w-3 h-3 rounded-full border-2 mt-0.5 transition-all duration-100"
@@ -168,5 +170,6 @@
         </div>
     </div>
     {% endif %}
+    {% endif %}{# /view_mode #}
 
 </div>

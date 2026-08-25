@@ -39,19 +39,24 @@
 
 {# File list #}
 <div id="file-list">
-    {% for file in files %}
-        {% if is_recycle_bin %}
-            {% include "drive/partials/recycle_row.html" %}
-        {% else %}
-            {% include "drive/partials/file_row.html" %}
-        {% endif %}
-    {% endfor %}
     {% if is_recycle_bin %}
+        {% for file in files %}
+            {% include "drive/partials/recycle_row.html" %}
+        {% endfor %}
         {% for folder in bin_folders %}
             {% include "drive/partials/recycle_folder_row.html" %}
         {% endfor %}
+    {% else %}
+        {% include "drive/partials/file_page.html" %}
     {% endif %}
 </div>
+
+{% if truncated %}
+<p class="text-sm text-zinc-500 mt-4 text-center">
+    Showing the first {{ files|length }} matches &nbsp;·&nbsp;
+    <span class="text-zinc-400">{{ truncated }} more not shown</span> — narrow your search to see them.
+</p>
+{% endif %}
 
 {# Empty states #}
 {% if is_archive_view and not files %}

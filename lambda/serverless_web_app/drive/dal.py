@@ -219,6 +219,52 @@ def list_files_in_folder(folder_id, active_only=True):
         kwargs["FilterExpression"] = Attr("deleted_at").not_exists()
     return [_file_from(i) for i in _query_all(_files_table(), **kwargs)]
 
+def list_files_page(folder_id, after=None, limit=150, keep=None):
+    """One page of a folder's files, newest first — returns (files, next_key).
+
+    Rendering a whole folder at once overruns Lambda's 6 MB response cap at
+    roughly 1,300 files, so listings are paged.
+
+    DynamoDB applies Limit *before* FilterExpression, so a raw page can come
+    back short or empty; keep querying until the page is full or the folder
+    is exhausted.
+    """
+    folder_key = folder_id if folder_id else ROOT
+    table = _files_table()
+    out = []
+    start = after
+
+    while True:
+        kwargs = dict(
+            IndexName="folder-index",
+            KeyConditionExpression=Key("folder_id").eq(folder_key),
+            FilterExpression=Attr("deleted_at").not_exists(),
+            ScanIndexForward=False,
+            Limit=max(limit * 2, 50),
+        )
+        if start:
+            kwargs["ExclusiveStartKey"] = start
+        resp = table.query(**kwargs)
+
+        for item in resp.get("Items", []):
+            f = _file_from(item)
+            if keep and not keep(f):
+                continue
+            out.append(f)
+            if len(out) >= limit:
+                # Resume from the last row actually returned, not the last
+                # row scanned — the filtered-out tail must be re-walked.
+                return out, {
+                    "file_id":     item["file_id"],
+                    "folder_id":   item.get("folder_id", ROOT),
+                    "uploaded_at": item.get("uploaded_at", ""),
+                }
+
+        start = resp.get("LastEvaluatedKey")
+        if not start:
+            return out, None
+
+
 def list_all_files(owner_sub):
     """All files for owner — active and deleted — newest first."""
     items = _query_all(

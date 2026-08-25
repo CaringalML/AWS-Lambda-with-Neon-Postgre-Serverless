@@ -39,7 +39,11 @@ document.addEventListener('alpine:init', () => {
         storageUsed: '{{ storage_used|default:"" }}',
         sidebarOpen: window.innerWidth >= 768,
         _confirmQueue: Promise.resolve(),
-        view: localStorage.getItem('nd_view') || 'list',
+        // Server-rendered from the nd_view cookie — it decides which layout
+        // each row ships, so this must agree with it.
+        view: '{{ view_mode|default:"list" }}',
+        _io: null,
+        _loadingMore: false,
         preview: null,
         ctx: { show: false, x: 0, y: 0, pk: null, archived: false, restoreStatus: '', name: '', isFolder: false, folderUrl: '' },
 
@@ -311,7 +315,59 @@ document.addEventListener('alpine:init', () => {
         csrf() {
             return document.querySelector('meta[name=csrf-token]').content;
         },
-        setView(v) { this.view = v; localStorage.setItem('nd_view', v); },
+        setView(v) {
+            if (this.view === v) return;
+            this.view = v;
+            document.cookie = `nd_view=${v};path=/;max-age=31536000;samesite=Lax`;
+            // Rows carry only the active layout now, so switching has to
+            // re-render them; cached HTML is the other layout.
+            this._searchCache = {};
+            const input = document.querySelector('input[name=q]');
+            if (input) this.doSearch(input.value, input.dataset.searchUrl);
+        },
+
+        init() {
+            this.$nextTick(() => this._armInfiniteScroll());
+        },
+
+        /* ── infinite scroll ── */
+        // A folder is delivered a page at a time; the sentinel at the end of
+        // the list pulls the next one in before it comes into view.
+        _armInfiniteScroll() {
+            if (!this._io) {
+                this._io = new IntersectionObserver(
+                    entries => { if (entries.some(e => e.isIntersecting)) this.loadMore(); },
+                    { rootMargin: '800px' }
+                );
+            }
+            this._io.disconnect();
+            const sentinel = document.getElementById('load-more');
+            if (sentinel) this._io.observe(sentinel);
+        },
+
+        async loadMore() {
+            if (this._loadingMore) return;
+            const sentinel = document.getElementById('load-more');
+            const cursor = sentinel?.dataset?.next;
+            if (!cursor) return;
+            this._loadingMore = true;
+            try {
+                const input = document.querySelector('input[name=q]');
+                const base = input?.dataset?.searchUrl || window.location.pathname;
+                const r = await fetch(`${base}?after=${encodeURIComponent(cursor)}`,
+                                      { headers: { 'HX-Request': 'true' } });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                // Response is the next rows plus the following sentinel
+                sentinel.outerHTML = await r.text();
+            } catch (e) {
+                console.error('Could not load more files:', e);
+                const s = document.getElementById('load-more');
+                if (s) s.textContent = 'Could not load more — scroll up and back to retry.';
+            } finally {
+                this._loadingMore = false;
+                this._armInfiniteScroll();
+            }
+        },
 
         rowClick(e, pk) {
             if (e.ctrlKey || e.metaKey) {
@@ -1002,7 +1058,10 @@ document.addEventListener('alpine:init', () => {
                 // reflect the real DB state without a full page reload
                 fetch(window.location.href, { headers: { 'HX-Request': 'true' } })
                     .then(r => r.text())
-                    .then(html => { document.getElementById('search-results').innerHTML = html; })
+                    .then(html => {
+                        document.getElementById('search-results').innerHTML = html;
+                        this._armInfiniteScroll();
+                    })
                     .catch(() => {});
             }
         },
@@ -1243,6 +1302,7 @@ document.addEventListener('alpine:init', () => {
                 // Repeat query within 30s — serve from cache, no request
                 const el = document.getElementById('search-results');
                 if (el) el.innerHTML = cached.html;
+                this._armInfiniteScroll();
                 this.searching = false;
                 return;
             }
@@ -1255,6 +1315,7 @@ document.addEventListener('alpine:init', () => {
                     if (seq !== this._searchSeq) return; // superseded by a newer keystroke
                     const el = document.getElementById('search-results');
                     if (el) el.innerHTML = html;
+                    this._armInfiniteScroll();
                 })
                 .catch(err => console.error('Search failed:', err))
                 .finally(() => {

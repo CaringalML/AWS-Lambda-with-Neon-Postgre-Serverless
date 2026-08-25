@@ -1,0 +1,16 @@
+{# One page of rows + the sentinel infinite scroll watches. Returned alone for #}
+{# "load more", so the response replaces the sentinel with rows and the next. #}
+{% for file in files %}
+    {% include "drive/partials/file_row.html" %}
+{% endfor %}
+
+{% if next_cursor %}
+<div id="load-more" data-next="{{ next_cursor }}"
+     class="col-span-full py-6 flex items-center justify-center gap-2.5 text-sm text-zinc-500">
+    <svg class="animate-spin w-4 h-4 text-sky-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+    </svg>
+    Loading more…
+</div>
+{% endif %}

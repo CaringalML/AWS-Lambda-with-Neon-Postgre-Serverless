@@ -2,6 +2,7 @@ import datetime
 import itertools
 import json
 import logging
+import base64
 import math
 import os
 from urllib.parse import quote, quote_plus
@@ -143,15 +144,17 @@ def _build_sidebar_tree(owner_sub):
 
 
 def _storage_stats(owner_sub):
+    """Returns (bytes, display, pct, active_file_count). The count rides along
+    so callers don't scan the library a second time just to count it."""
     active = [f for f in dal.list_all_files(owner_sub) if not f.deleted_at]
     raw = sum(f.size for f in active)
     pct = min(100, round(raw / _STORAGE_CAP_BYTES * 100, 1))
     total = float(raw)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if total < 1024:
-            return raw, f"{total:.1f} {unit}", pct
+            return raw, f"{total:.1f} {unit}", pct, len(active)
         total /= 1024
-    return raw, f"{total:.1f} PB", pct
+    return raw, f"{total:.1f} PB", pct, len(active)
 
 
 def _collect_folder_ids(folder, owner_sub):
@@ -224,6 +227,50 @@ def _request_thumbnail(s3_key):
         logger.warning("thumbnail backfill request failed for %s: %s", s3_key, e)
 
 
+# Rows per listing page. A full folder overruns Lambda's 6 MB response cap at
+# roughly 1,300 files, so listings are paged rather than rendered whole.
+_PAGE_SIZE = 150
+
+
+def _encode_cursor(key):
+    """DynamoDB LastEvaluatedKey -> opaque string safe for a query param."""
+    if not key:
+        return ""
+    return base64.urlsafe_b64encode(json.dumps(key).encode()).decode()
+
+
+def _decode_cursor(raw):
+    if not raw:
+        return None
+    try:
+        key = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+        return key if isinstance(key, dict) else None
+    except Exception:
+        return None  # tampered or stale cursor — start from the top
+
+
+def _view_mode(request):
+    """List or grid. A cookie rather than localStorage so the server can render
+    just the one layout instead of shipping both in every row."""
+    return "grid" if request.COOKIES.get("nd_view") == "grid" else "list"
+
+
+def _drive_visible(f, now):
+    """Does this file belong in a drive listing? Expires a lapsed restore
+    window on the way past, which is what the old full-library sweep did."""
+    if (f.restore_status == DriveFile.RESTORE_READY
+            and f.restore_expires_at
+            and _parse_dt(f.restore_expires_at) < now):
+        dal.clear_restore_status(f.file_id)
+        f.restore_status = ""
+        f.restore_expires_at = None
+    if f.deleted_at:
+        return False
+    return (f.storage_class == DriveFile.GLACIER_IR
+            or (f.storage_class == DriveFile.DEEP_ARCHIVE
+                and f.restore_status == DriveFile.RESTORE_READY))
+
+
 def _require_folder(folder_id, owner_sub):
     folder = dal.get_folder(folder_id)
     if not folder or folder.owner_sub != owner_sub:
@@ -273,42 +320,35 @@ def drive_home(request, folder_pk=None):
         breadcrumbs = _build_breadcrumbs(current_folder)
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    all_files = dal.list_all_files(owner_sub)
-    active_files = [f for f in all_files if not f.deleted_at]
-
-    # Expire restored files whose 7-day window has passed
-    for f in active_files:
-        if (f.restore_status == DriveFile.RESTORE_READY
-                and f.restore_expires_at
-                and _parse_dt(f.restore_expires_at) < now):
-            dal.clear_restore_status(f.file_id)
-            f.restore_status = ""
-            f.restore_expires_at = None
-
     q = request.GET.get("q", "").strip()
     current_folder_id = current_folder.folder_id if current_folder else None
+    after = _decode_cursor(request.GET.get("after"))
+
+    def visible(f):
+        return _drive_visible(f, now)
+
+    truncated = 0
+    next_cursor = ""
 
     if q:
+        # No index on name, so search still reads the library — but it returns
+        # a page of it, or a big result set would blow the response cap too.
         ql = q.lower()
-        files = [
-            f for f in active_files
-            if ql in f.name.lower()
-            and (f.storage_class == DriveFile.GLACIER_IR
-                 or (f.storage_class == DriveFile.DEEP_ARCHIVE
-                     and f.restore_status == DriveFile.RESTORE_READY))
-        ]
-        all_folders = dal.list_all_folders(owner_sub)
-        subfolders = [fld for fld in all_folders if not fld.deleted_at and ql in fld.name.lower()]
+        matches = [f for f in dal.list_all_files(owner_sub)
+                   if ql in f.name.lower() and visible(f)]
+        files = matches[:_PAGE_SIZE]
+        truncated = len(matches) - len(files)
+        subfolders = [fld for fld in dal.list_all_folders(owner_sub)
+                      if not fld.deleted_at and ql in fld.name.lower()]
     else:
-        folder_files = [f for f in active_files if f.folder_id == current_folder_id]
-        files = [
-            f for f in folder_files
-            if f.storage_class == DriveFile.GLACIER_IR
-            or (f.storage_class == DriveFile.DEEP_ARCHIVE
-                and f.restore_status == DriveFile.RESTORE_READY)
-        ]
-        files.sort(key=lambda f: f.uploaded_at, reverse=True)
-        subfolders = dal.list_subfolders(owner_sub, current_folder_id, active_only=True)
+        # One folder-index page instead of reading every file the owner has
+        files, next_key = dal.list_files_page(
+            current_folder_id, after=after, limit=_PAGE_SIZE, keep=visible,
+        )
+        next_cursor = _encode_cursor(next_key)
+        # Folders belong to the first page only; "load more" is files alone
+        subfolders = ([] if after else
+                      dal.list_subfolders(owner_sub, current_folder_id, active_only=True))
 
     ctx = {
         "files":          files,
@@ -316,14 +356,20 @@ def drive_home(request, folder_pk=None):
         "current_folder": current_folder,
         "breadcrumbs":    breadcrumbs,
         "search_query":   q,
+        "next_cursor":    next_cursor,
+        "truncated":      truncated,
+        "view_mode":      _view_mode(request),
     }
+
+    # Infinite scroll asking for the next batch — rows and nothing else
+    if after:
+        return render(request, "drive/partials/file_page.html", ctx)
 
     if request.headers.get("HX-Request"):
         return render(request, "drive/partials/search_results.html", ctx)
 
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
-    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = len(active_files)
+    _, ctx["storage_used"], ctx["storage_pct"], ctx["total_files"] = _storage_stats(owner_sub)
     ctx["failed_count"] = _failed_upload_count(owner_sub)
 
     response = render(request, "drive/home.html", ctx)
@@ -526,7 +572,7 @@ def confirm_upload(request):
         )
 
         html = render(request, "drive/partials/file_row.html", {"file": drive_file}).content.decode()
-        _, storage_used, _ = _storage_stats(owner_sub)
+        _, storage_used, _, _ = _storage_stats(owner_sub)
         return JsonResponse({"html": html, "id": drive_file.file_id,
                              "storage_used": storage_used, "overwritten": not created})
     except Exception as e:
@@ -671,7 +717,7 @@ def multipart_complete(request):
         # No copy_object — the storage class was set on create_multipart_upload.
 
         html = render(request, "drive/partials/file_row.html", {"file": drive_file}).content.decode()
-        _, storage_used, _ = _storage_stats(owner_sub)
+        _, storage_used, _, _ = _storage_stats(owner_sub)
         return JsonResponse({"html": html, "id": drive_file.file_id,
                              "storage_used": storage_used, "overwritten": not created})
     except Http404:
@@ -983,6 +1029,7 @@ def recycle_bin(request):
         "current_folder": None,
         "breadcrumbs":    [],
         "is_recycle_bin": True,
+        "view_mode":      _view_mode(request),
         "search_query":   q,
     }
 
@@ -991,8 +1038,7 @@ def recycle_bin(request):
 
     active_files = [f for f in all_files if not f.deleted_at]
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
-    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = len(active_files)
+    _, ctx["storage_used"], ctx["storage_pct"], ctx["total_files"] = _storage_stats(owner_sub)
     ctx["failed_count"] = _failed_upload_count(owner_sub)
 
     response = render(request, "drive/home.html", ctx)
@@ -1073,6 +1119,7 @@ def failed_uploads(request):
         "current_folder":  None,
         "breadcrumbs":     [],
         "is_failed_view":  True,
+        "view_mode":      _view_mode(request),
         "search_query":    q,
     }
 
@@ -1081,8 +1128,7 @@ def failed_uploads(request):
 
     active_files = [f for f in dal.list_all_files(owner_sub) if not f.deleted_at]
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
-    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = len(active_files)
+    _, ctx["storage_used"], ctx["storage_pct"], ctx["total_files"] = _storage_stats(owner_sub)
     ctx["failed_count"] = len(all_failures)   # already fetched — don't re-query
 
     response = render(request, "drive/home.html", ctx)
@@ -1179,6 +1225,7 @@ def archive_view(request):
         "current_folder": None,
         "breadcrumbs":    [],
         "is_archive_view": True,
+        "view_mode":      _view_mode(request),
         "search_query":   q,
     }
 
@@ -1187,8 +1234,7 @@ def archive_view(request):
 
     active_files = [f for f in all_files if not f.deleted_at]
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
-    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
-    ctx["total_files"] = len(active_files)
+    _, ctx["storage_used"], ctx["storage_pct"], ctx["total_files"] = _storage_stats(owner_sub)
     ctx["failed_count"] = _failed_upload_count(owner_sub)
 
     response = render(request, "drive/home.html", ctx)
@@ -1477,7 +1523,7 @@ def timeline_view(request):
     ]
 
     active_files = [f for f in all_files if not f.deleted_at]
-    _, storage_used, storage_pct = _storage_stats(owner_sub)
+    _, storage_used, storage_pct, _ = _storage_stats(owner_sub)
 
     ctx = {
         "groups":         groups,
