@@ -9,6 +9,25 @@
 </p>
 {% endif %}
 
+{# ── Failed uploads view — its own list, then done ── #}
+{% if is_failed_view %}
+<div id="failed-list">
+    {% for failure in failures %}
+        {% include "drive/partials/failed_row.html" %}
+    {% endfor %}
+</div>
+{% if not failures %}
+<div class="text-center bg-[#13151c] border border-zinc-700/60 rounded-xl py-20 mt-2">
+    <svg xmlns="http://www.w3.org/2000/svg" class="w-12 h-12 mx-auto mb-4 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.5m0 3.5h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+    </svg>
+    <p class="text-zinc-400 text-lg">{% if search_query %}No results for "{{ search_query }}"{% else %}No failed uploads{% endif %}</p>
+    <p class="text-zinc-500 text-sm mt-1">{% if search_query %}Try a different search term{% else %}Uploads that don't complete will be listed here{% endif %}</p>
+</div>
+{% endif %}
+
+{% else %}
+
 {# Folder list (hidden on archive/bin views) #}
 {% if not is_archive_view and not is_recycle_bin %}
 <div id="folder-list" class="mb-2">
@@ -64,3 +83,5 @@
     <p class="text-zinc-500 text-sm mt-1">{% if search_query %}Try a different search term{% else %}Create a folder or upload a file using the buttons above{% endif %}</p>
 </div>
 {% endif %}
+
+{% endif %}{# /is_failed_view #}

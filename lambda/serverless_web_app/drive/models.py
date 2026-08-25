@@ -145,6 +145,62 @@ class DriveFile:
 
 
 @dataclass
+class UploadFailure:
+    """One upload that never made it into the drive.
+
+    Recorded by the browser — most failures (network drop, S3 reject) never
+    reach a server view, so the client POSTs the record itself.
+    """
+
+    STAGE_PRESIGN = "presign"
+    STAGE_UPLOAD  = "upload"
+    STAGE_CONFIRM = "confirm"
+
+    STAGE_CHOICES = [
+        ("presign", "Requesting upload URL"),
+        ("upload",  "Uploading to storage"),
+        ("confirm", "Saving file record"),
+        ("unknown", "Unknown"),
+    ]
+
+    failure_id:   str
+    owner_sub:    str
+    filename:     str
+    size:         int
+    content_type: str
+    folder_id:    str | None
+    folder_name:  str
+    stage:        str
+    error:        str
+    failed_at:    str
+
+    @property
+    def pk(self):
+        return self.failure_id
+
+    @property
+    def id(self):
+        return self.failure_id
+
+    def stage_label(self):
+        return dict(self.STAGE_CHOICES).get(self.stage, "Unknown")
+
+    def size_display(self):
+        size = float(self.size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def location_label(self):
+        return self.folder_name or "My Drive"
+
+    def __str__(self):
+        return f"UploadFailure({self.filename}, {self.stage})"
+
+
+@dataclass
 class BatchJob:
     PENDING = "pending"
     RUNNING = "running"

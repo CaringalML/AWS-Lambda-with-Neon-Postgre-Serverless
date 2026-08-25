@@ -20,7 +20,7 @@ from django.shortcuts import render, redirect
 from django.views.decorators.http import require_POST
 
 from accounts.decorators import cognito_login_required
-from .models import DriveFile, BatchJob, _ListProxy
+from .models import DriveFile, BatchJob, UploadFailure, _ListProxy
 from . import dal
 
 logger = logging.getLogger(__name__)
@@ -237,6 +237,16 @@ def _require_file(file_id, owner_sub):
     return f
 
 
+def _failed_upload_count(owner_sub):
+    """Badge count for the sidebar — one extra Query per full page render."""
+    try:
+        return len(dal.list_upload_failures(owner_sub))
+    except Exception as e:
+        # A missing table (pre-Terraform-apply) must not 500 the whole drive.
+        logger.warning("failed-upload count unavailable: %s", e)
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Views — Drive home
 # ---------------------------------------------------------------------------
@@ -302,6 +312,7 @@ def drive_home(request, folder_pk=None):
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
     _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
     ctx["total_files"] = len(active_files)
+    ctx["failed_count"] = _failed_upload_count(owner_sub)
 
     response = render(request, "drive/home.html", ctx)
     response["Cache-Control"] = "no-store"
@@ -798,10 +809,124 @@ def recycle_bin(request):
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
     _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
     ctx["total_files"] = len(active_files)
+    ctx["failed_count"] = _failed_upload_count(owner_sub)
 
     response = render(request, "drive/home.html", ctx)
     response["Cache-Control"] = "no-store"
     return response
+
+
+# ---------------------------------------------------------------------------
+# Failed upload history
+# ---------------------------------------------------------------------------
+
+# DynamoDB items are billed by size and the browser can hand us anything —
+# cap the free-text fields before they're stored.
+_MAX_ERROR_LEN    = 500
+_MAX_FILENAME_LEN = 255
+
+
+@cognito_login_required
+@require_POST
+def record_upload_failure(request):
+    """Called by the browser when an upload fails at any stage.
+
+    Never returns an error status the uploader has to handle — a failure to
+    record a failure should stay silent rather than stack a second toast on
+    top of the one the user is already looking at.
+    """
+    owner_sub = _get_owner_sub(request)
+    try:
+        data = json.loads(request.body)
+
+        folder_id = None
+        folder_name = ""
+        if folder_pk := data.get("folder_pk"):
+            folder = dal.get_folder(folder_pk)
+            if folder and folder.owner_sub == owner_sub:
+                folder_id = folder.folder_id
+                folder_name = folder.name
+
+        stage = data.get("stage", "unknown")
+        if stage not in dict(UploadFailure.STAGE_CHOICES):
+            stage = "unknown"
+
+        failure = dal.create_upload_failure(
+            owner_sub=owner_sub,
+            filename=str(data.get("filename", ""))[:_MAX_FILENAME_LEN],
+            size=int(data.get("size", 0) or 0),
+            content_type=str(data.get("content_type", ""))[:100],
+            folder_id=folder_id,
+            folder_name=folder_name,
+            stage=stage,
+            error=str(data.get("error", ""))[:_MAX_ERROR_LEN],
+        )
+        return JsonResponse({"id": failure.failure_id})
+    except Exception as e:
+        logger.error("could not record upload failure: %s", e)
+        return JsonResponse({"recorded": False}, status=200)
+
+
+@cognito_login_required
+def failed_uploads(request):
+    owner_sub = _get_owner_sub(request)
+    all_failures = dal.list_upload_failures(owner_sub)
+
+    q = request.GET.get("q", "").strip()
+    if q:
+        ql = q.lower()
+        failures = [
+            f for f in all_failures
+            if ql in f.filename.lower() or ql in f.error.lower()
+        ]
+    else:
+        failures = all_failures
+
+    ctx = {
+        "failures":        failures,
+        "files":           [],
+        "subfolders":      [],
+        "current_folder":  None,
+        "breadcrumbs":     [],
+        "is_failed_view":  True,
+        "search_query":    q,
+    }
+
+    if request.headers.get("HX-Request"):
+        return render(request, "drive/partials/search_results.html", ctx)
+
+    active_files = [f for f in dal.list_all_files(owner_sub) if not f.deleted_at]
+    ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
+    _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
+    ctx["total_files"] = len(active_files)
+    ctx["failed_count"] = len(all_failures)   # already fetched — don't re-query
+
+    response = render(request, "drive/home.html", ctx)
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@cognito_login_required
+@require_POST
+def delete_upload_failures(request):
+    """Delete selected failure records, or every record when clear_all is set."""
+    owner_sub = _get_owner_sub(request)
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    if data.get("clear_all"):
+        target_ids = [f.failure_id for f in dal.list_upload_failures(owner_sub)]
+    else:
+        # Ownership check before deleting — ids come straight from the browser
+        target_ids = [
+            fid for fid in data.get("ids", [])
+            if (rec := dal.get_upload_failure(fid)) and rec.owner_sub == owner_sub
+        ]
+
+    dal.delete_upload_failures(target_ids)
+    return JsonResponse({"deleted": target_ids, "remaining": _failed_upload_count(owner_sub)})
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +1005,7 @@ def archive_view(request):
     ctx["sidebar_folders"] = _build_sidebar_tree(owner_sub)
     _, ctx["storage_used"], ctx["storage_pct"] = _storage_stats(owner_sub)
     ctx["total_files"] = len(active_files)
+    ctx["failed_count"] = _failed_upload_count(owner_sub)
 
     response = render(request, "drive/home.html", ctx)
     response["Cache-Control"] = "no-store"
@@ -1177,6 +1303,7 @@ def timeline_view(request):
         "storage_used":   storage_used,
         "storage_pct":    storage_pct,
         "total_files":    len(active_files),
+        "failed_count":   _failed_upload_count(owner_sub),
         "files":          active_files,
         "subfolders":     [],
         "current_folder": None,

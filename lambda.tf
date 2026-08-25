@@ -39,6 +39,7 @@ resource "aws_lambda_function" "serverless_web_app" {
       DYNAMODB_FOLDERS_TABLE          = aws_dynamodb_table.folders.name
       DYNAMODB_FILES_TABLE            = aws_dynamodb_table.files.name
       DYNAMODB_BATCH_JOBS_TABLE       = aws_dynamodb_table.batch_jobs.name
+      DYNAMODB_UPLOAD_FAILURES_TABLE  = aws_dynamodb_table.upload_failures.name
       # Thumbnail backfill (async invoke when a thumb is missing)
       THUMBNAILER_FUNCTION            = aws_lambda_function.thumbnailer.function_name
     }

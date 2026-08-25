@@ -32,4 +32,7 @@ urlpatterns = [
     path("folders/zip/",                   views.zip_folder,              name="drive_zip_folders"),
     path("job/<str:job_id>/status/",       views.job_status,              name="drive_job_status"),
     path("timeline/",                       views.timeline_view,           name="drive_timeline"),
+    path("failed/",                         views.failed_uploads,          name="drive_failed"),
+    path("failed/record/",                  views.record_upload_failure,   name="drive_failed_record"),
+    path("failed/delete/",                  views.delete_upload_failures,  name="drive_failed_delete"),
 ]

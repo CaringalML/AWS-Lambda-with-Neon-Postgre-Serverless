@@ -6,7 +6,7 @@ import boto3
 from boto3.dynamodb.conditions import Key, Attr
 from django.conf import settings
 
-from .models import DriveFile, DriveFolder, BatchJob, _ListProxy
+from .models import DriveFile, DriveFolder, BatchJob, UploadFailure, _ListProxy
 
 ROOT = "ROOT"  # sentinel stored in DynamoDB for null parent_id / folder_id
 
@@ -26,6 +26,9 @@ def _files_table():
 
 def _batch_jobs_table():
     return _ddb().Table(os.environ["DYNAMODB_BATCH_JOBS_TABLE"])
+
+def _upload_failures_table():
+    return _ddb().Table(os.environ["DYNAMODB_UPLOAD_FAILURES_TABLE"])
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -81,6 +84,22 @@ def _file_from(item):
         restore_expires_at=item.get("restore_expires_at"),
         deleted_at=item.get("deleted_at"),
         captured_at=item.get("captured_at"),
+    )
+
+def _failure_from(item):
+    if not item:
+        return None
+    return UploadFailure(
+        failure_id=item["failure_id"],
+        owner_sub=item["owner_sub"],
+        filename=item.get("filename", ""),
+        size=int(item.get("size", 0)),
+        content_type=item.get("content_type", ""),
+        folder_id=None if item.get("folder_id") == ROOT else item.get("folder_id"),
+        folder_name=item.get("folder_name", ""),
+        stage=item.get("stage", "unknown"),
+        error=item.get("error", ""),
+        failed_at=item.get("failed_at", ""),
     )
 
 def _job_from(item):
@@ -322,6 +341,59 @@ def clear_restore_status(file_id):
         UpdateExpression="SET restore_status=:rs REMOVE restore_expires_at",
         ExpressionAttributeValues={":rs": ""},
     )
+
+
+# ---------------------------------------------------------------------------
+# Upload failure history
+# ---------------------------------------------------------------------------
+
+# Records expire on their own so the history can't grow without bound.
+_FAILURE_RETENTION_DAYS = 90
+
+def create_upload_failure(owner_sub, filename, size, content_type,
+                          folder_id, folder_name, stage, error):
+    failure_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    item = {
+        "failure_id":   failure_id,
+        "owner_sub":    owner_sub,
+        "filename":     filename,
+        "size":         size,
+        "content_type": content_type,
+        "folder_id":    folder_id if folder_id else ROOT,
+        "folder_name":  folder_name,
+        "stage":        stage,
+        "error":        error,
+        "failed_at":    now.isoformat(),
+        "ttl":          int((now + timedelta(days=_FAILURE_RETENTION_DAYS)).timestamp()),
+    }
+    _upload_failures_table().put_item(Item=item)
+    return _failure_from(item)
+
+def list_upload_failures(owner_sub):
+    """All recorded upload failures for owner — newest first."""
+    items = _query_all(
+        _upload_failures_table(),
+        IndexName="owner-failed-index",
+        KeyConditionExpression=Key("owner_sub").eq(owner_sub),
+        ScanIndexForward=False,
+    )
+    return [_failure_from(i) for i in items]
+
+def get_upload_failure(failure_id):
+    resp = _upload_failures_table().get_item(Key={"failure_id": failure_id})
+    return _failure_from(resp.get("Item"))
+
+def delete_upload_failure(failure_id):
+    _upload_failures_table().delete_item(Key={"failure_id": failure_id})
+
+def delete_upload_failures(failure_ids):
+    """Batch-delete a list of failure records — 25 per request, handled by boto."""
+    if not failure_ids:
+        return
+    with _upload_failures_table().batch_writer() as batch:
+        for fid in failure_ids:
+            batch.delete_item(Key={"failure_id": fid})
 
 
 # ---------------------------------------------------------------------------

@@ -136,6 +136,44 @@ resource "aws_dynamodb_table" "batch_jobs" {
   }
 }
 
+# TTL auto-deletes failed-upload records 90 days after the failure, so the
+# history never grows unbounded even if the user never clears it.
+resource "aws_dynamodb_table" "upload_failures" {
+  name         = "${var.lambda_function_name}-upload-failures-${var.environment}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "failure_id"
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  attribute {
+    name = "failure_id"
+    type = "S"
+  }
+  attribute {
+    name = "owner_sub"
+    type = "S"
+  }
+  attribute {
+    name = "failed_at"
+    type = "S"
+  }
+
+  # List failed uploads for an owner, newest first via reverse scan
+  global_secondary_index {
+    name            = "owner-failed-index"
+    hash_key        = "owner_sub"
+    range_key       = "failed_at"
+    projection_type = "ALL"
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
 resource "aws_iam_role_policy" "lambda_dynamodb" {
   name = "${var.lambda_function_name}-${var.environment}-dynamodb-policy"
   role = aws_iam_role.lambda_role.id
@@ -162,6 +200,8 @@ resource "aws_iam_role_policy" "lambda_dynamodb" {
           "${aws_dynamodb_table.files.arn}/index/*",
           aws_dynamodb_table.batch_jobs.arn,
           "${aws_dynamodb_table.batch_jobs.arn}/index/*",
+          aws_dynamodb_table.upload_failures.arn,
+          "${aws_dynamodb_table.upload_failures.arn}/index/*",
         ]
       }
     ]
