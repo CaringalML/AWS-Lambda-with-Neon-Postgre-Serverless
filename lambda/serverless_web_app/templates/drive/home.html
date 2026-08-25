@@ -507,8 +507,18 @@ document.addEventListener('alpine:init', () => {
                     body: JSON.stringify({ filename: file.name, content_type: file.type || 'application/octet-stream', folder_pk: folderPk }),
                 });
                 if (!resp.ok) throw new Error(`Upload URL failed (HTTP ${resp.status})`);
-                const { url, fields, s3_key, error, exists } = await resp.json();
+                const { url, fields, s3_key, error, exists, max_bytes } = await resp.json();
                 if (error) throw new Error(error);
+
+                // Fail fast — S3 would reject this anyway, but only after the
+                // whole file has gone over the wire.
+                stage = 'precheck';
+                if (max_bytes && file.size > max_bytes) {
+                    throw new Error(
+                        `File is ${this._fmtBytes(file.size)} — the upload limit is ` +
+                        `${this._fmtBytes(max_bytes)}. Nothing was uploaded.`
+                    );
+                }
 
                 if (exists) {
                     // Serialize overwrite confirmations — one modal at a time even during concurrent uploads
@@ -539,7 +549,7 @@ document.addEventListener('alpine:init', () => {
                     });
                     xhr.addEventListener('load', () => {
                         if (xhr.status >= 200 && xhr.status < 300) { this._updateUploadToast(toastId, 95); resolve(); }
-                        else reject(new Error(`S3 rejected upload (HTTP ${xhr.status})`));
+                        else reject(new Error(this._s3Error(xhr)));
                     });
                     xhr.addEventListener('error', () => reject(new Error('Network error check CORS config.')));
                     xhr.send(form);
@@ -573,6 +583,39 @@ document.addEventListener('alpine:init', () => {
                 this._failUploadToast(toastId, file.name);
                 await this._recordFailure(file, folderPk, stage, err);
                 return 'failed';
+            }
+        },
+
+        _fmtBytes(n) {
+            let v = Number(n) || 0;
+            for (const unit of ['B', 'KB', 'MB', 'GB']) {
+                if (v < 1024) return `${v.toFixed(1)} ${unit}`;
+                v /= 1024;
+            }
+            return `${v.toFixed(1)} TB`;
+        },
+
+        // S3 answers a rejected POST with an XML <Error> body carrying the real
+        // reason — and for size rejections, the actual limit. A bare status
+        // code tells nobody anything, so dig the details out.
+        _s3Error(xhr) {
+            const generic = `S3 rejected upload (HTTP ${xhr.status})`;
+            try {
+                const doc  = new DOMParser().parseFromString(xhr.responseText || '', 'text/xml');
+                const pick = tag => doc.querySelector(tag)?.textContent?.trim() || '';
+                const code = pick('Code');
+                if (!code) return generic;
+
+                const proposed = pick('ProposedSize');
+                const maxSize  = pick('MaxSizeAllowed');
+                if (code === 'EntityTooLarge' && proposed && maxSize) {
+                    return `File is ${this._fmtBytes(proposed)} — the upload limit is ` +
+                           `${this._fmtBytes(maxSize)} (EntityTooLarge).`;
+                }
+                const msg = pick('Message');
+                return msg ? `${code}: ${msg}` : `${code} (HTTP ${xhr.status})`;
+            } catch (e) {
+                return generic;
             }
         },
 
@@ -1415,6 +1458,9 @@ document.addEventListener('alpine:init', () => {
                             <input type="file" multiple class="hidden" :disabled="uploading"
                                    @change="addNewOpen = false; handleUpload($event)">
                         </label>
+
+                        {# Know the cap before picking, not after the bytes are sent #}
+                        <p class="px-4 pb-1 text-[10px] text-zinc-600">Max {{ MAX_UPLOAD_DISPLAY }} per file</p>
 
                         {# Upload folder #}
                         <label class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-white/5 hover:text-zinc-100 transition-colors cursor-pointer">

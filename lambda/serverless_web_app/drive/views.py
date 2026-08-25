@@ -463,12 +463,13 @@ def upload_url(request):
             Fields={"Content-Type": content_type},
             Conditions=[
                 {"Content-Type": content_type},
-                ["content-length-range", 1, 500 * 1024 * 1024],
+                ["content-length-range", 1, settings.MAX_UPLOAD_BYTES],
             ],
             ExpiresIn=300,
         )
         return JsonResponse({"url": presigned["url"], "fields": presigned["fields"],
-                             "s3_key": s3_key, "exists": exists})
+                             "s3_key": s3_key, "exists": exists,
+                             "max_bytes": settings.MAX_UPLOAD_BYTES})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 

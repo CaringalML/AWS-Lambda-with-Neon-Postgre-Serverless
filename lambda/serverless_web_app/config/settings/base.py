@@ -65,6 +65,12 @@ DYNAMODB_FILES_TABLE      = os.environ.get("DYNAMODB_FILES_TABLE", "")
 DYNAMODB_BATCH_JOBS_TABLE = os.environ.get("DYNAMODB_BATCH_JOBS_TABLE", "")
 DYNAMODB_UPLOAD_FAILURES_TABLE = os.environ.get("DYNAMODB_UPLOAD_FAILURES_TABLE", "")
 
+# Largest single upload. A presigned POST is one HTTP request, so this is also
+# the point past which a dropped connection costs the whole transfer. Enforced
+# by the presigned policy, shown in the UI, and handed to the browser so
+# oversized files are rejected before the bytes go on the wire.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+
 # Thumbnail generator Lambda (async backfill invokes)
 THUMBNAILER_FUNCTION = os.environ.get("THUMBNAILER_FUNCTION", "")
 

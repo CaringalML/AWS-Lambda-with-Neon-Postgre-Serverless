@@ -152,15 +152,12 @@ class UploadFailure:
     reach a server view, so the client POSTs the record itself.
     """
 
-    STAGE_PRESIGN = "presign"
-    STAGE_UPLOAD  = "upload"
-    STAGE_CONFIRM = "confirm"
-
     STAGE_CHOICES = [
-        ("presign", "Requesting upload URL"),
-        ("upload",  "Uploading to storage"),
-        ("confirm", "Saving file record"),
-        ("unknown", "Unknown"),
+        ("presign",  "Requesting upload URL"),
+        ("precheck", "Checking file size"),
+        ("upload",   "Uploading to storage"),
+        ("confirm",  "Saving file record"),
+        ("unknown",  "Unknown"),
     ]
 
     failure_id:   str
