@@ -50,6 +50,8 @@ document.addEventListener('alpine:init', () => {
         /* ── batch completion chime ── */
         // Only for batches worth walking away from
         SOUND_MIN_FILES: 10,
+        // Above this, skip per-row DOM injection and refetch once instead
+        BULK_INJECT_LIMIT: 50,
         soundEnabled: localStorage.getItem('nd_upload_sound') !== 'off',
         _audioCtx: null,
 
@@ -734,7 +736,6 @@ document.addEventListener('alpine:init', () => {
                         if (list) { list.insertAdjacentHTML('afterbegin', result.html); document.getElementById('empty-state')?.remove(); }
                     }
                 }
-                if (result.storage_used) this.storageUsed = result.storage_used;
                 this._completeUploadToast(toastId);
                 return 'ok';
             } catch (err) {
@@ -893,7 +894,6 @@ document.addEventListener('alpine:init', () => {
                         if (list) { list.insertAdjacentHTML('afterbegin', result.html); document.getElementById('empty-state')?.remove(); }
                     }
                 }
-                if (result.storage_used) this.storageUsed = result.storage_used;
                 this._completeUploadToast(toastId);
                 return 'ok';
             } catch (err) {
@@ -979,13 +979,42 @@ document.addEventListener('alpine:init', () => {
             // Still inside the file-picker gesture here — see _primeAudio
             if (files.length > this.SOUND_MIN_FILES) this._primeAudio();
             const folderPk = {% if current_folder %}'{{ current_folder.pk }}'{% else %}null{% endif %};
+            // Injecting thousands of rows would rebuild the DOM the pagination
+            // just trimmed, and fire a thumbnail request for every one. Past
+            // this size, refetch the first page once at the end instead.
+            const injectRows = files.length <= this.BULK_INJECT_LIMIT;
             const tasks = files.map(file => () => {
                 const toastId = this._addUploadToast(file.name);
-                return this._uploadOne(file, folderPk, toastId);
+                return this._uploadOne(file, folderPk, toastId, injectRows);
             });
             const results = await this._runConcurrent(tasks, 5);
             this.uploading = false;
+            if (!injectRows) await this._reloadListing();
+            await this._refreshStorage();
             this._announceBatch(files.length, results);
+        },
+
+        // One library scan per batch rather than one per file
+        async _refreshStorage() {
+            try {
+                const r = await fetch('{% url "drive_storage" %}');
+                const d = await r.json();
+                if (d.storage_used) this.storageUsed = d.storage_used;
+            } catch (e) {
+                console.error('Could not refresh storage total:', e);
+            }
+        },
+
+        async _reloadListing() {
+            try {
+                const input = document.querySelector('input[name=q]');
+                const url = input?.dataset?.searchUrl || window.location.pathname;
+                const r = await fetch(url, { headers: { 'HX-Request': 'true' } });
+                document.getElementById('search-results').innerHTML = await r.text();
+                this._armInfiniteScroll();
+            } catch (e) {
+                console.error('Could not refresh the listing:', e);
+            }
         },
 
         async uploadFolder(event) {
@@ -1056,13 +1085,8 @@ document.addEventListener('alpine:init', () => {
                 this.uploading = false;
                 // Reload the file/folder list from the server so injected rows
                 // reflect the real DB state without a full page reload
-                fetch(window.location.href, { headers: { 'HX-Request': 'true' } })
-                    .then(r => r.text())
-                    .then(html => {
-                        document.getElementById('search-results').innerHTML = html;
-                        this._armInfiniteScroll();
-                    })
-                    .catch(() => {});
+                this._reloadListing();
+                this._refreshStorage();
             }
         },
 
@@ -1190,6 +1214,7 @@ document.addEventListener('alpine:init', () => {
             // stale either way; on 'ok' it's simply done with.
             await this._deleteFailures([pending.pk]);
             if (outcome === 'ok') {
+                this._refreshStorage();
                 this.showToast(`"${file.name}" uploaded successfully`, 'success');
             }
         },

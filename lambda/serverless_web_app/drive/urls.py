@@ -16,6 +16,7 @@ urlpatterns = [
     path("multipart/urls/",                 views.multipart_urls,          name="drive_multipart_urls"),
     path("multipart/complete/",             views.multipart_complete,      name="drive_multipart_complete"),
     path("multipart/abort/",                views.multipart_abort,         name="drive_multipart_abort"),
+    path("storage/",                        views.storage_stats,           name="drive_storage"),
     path("download/<str:pk>/",              views.download_file,           name="drive_download"),
     path("view/<str:pk>/url/",              views.get_file_url,            name="drive_file_url"),
     path("view/<str:pk>/",                  views.view_file,               name="drive_view"),

@@ -571,10 +571,12 @@ def confirm_upload(request):
             MetadataDirective="COPY",
         )
 
-        html = render(request, "drive/partials/file_row.html", {"file": drive_file}).content.decode()
-        _, storage_used, _, _ = _storage_stats(owner_sub)
+        html = render(request, "drive/partials/file_row.html",
+                      {"file": drive_file, "view_mode": _view_mode(request)}).content.decode()
+        # Storage is NOT computed here: it costs a full library scan, and one
+        # per file makes a bulk upload O(n^2). The client asks once per batch.
         return JsonResponse({"html": html, "id": drive_file.file_id,
-                             "storage_used": storage_used, "overwritten": not created})
+                             "overwritten": not created})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -716,10 +718,12 @@ def multipart_complete(request):
         )
         # No copy_object — the storage class was set on create_multipart_upload.
 
-        html = render(request, "drive/partials/file_row.html", {"file": drive_file}).content.decode()
-        _, storage_used, _, _ = _storage_stats(owner_sub)
+        html = render(request, "drive/partials/file_row.html",
+                      {"file": drive_file, "view_mode": _view_mode(request)}).content.decode()
+        # Storage is NOT computed here: it costs a full library scan, and one
+        # per file makes a bulk upload O(n^2). The client asks once per batch.
         return JsonResponse({"html": html, "id": drive_file.file_id,
-                             "storage_used": storage_used, "overwritten": not created})
+                             "overwritten": not created})
     except Http404:
         raise
     except Exception as e:
@@ -757,6 +761,15 @@ def multipart_abort(request):
 # ---------------------------------------------------------------------------
 # File serving
 # ---------------------------------------------------------------------------
+
+@cognito_login_required
+def storage_stats(request):
+    """Sidebar storage figures. Split out of confirm_upload so a 3,000-file
+    batch pays for one library scan instead of 3,000."""
+    owner_sub = _get_owner_sub(request)
+    _, used, pct, total = _storage_stats(owner_sub)
+    return JsonResponse({"storage_used": used, "storage_pct": pct, "total_files": total})
+
 
 @cognito_login_required
 def download_file(request, pk):
