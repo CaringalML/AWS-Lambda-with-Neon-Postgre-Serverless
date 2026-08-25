@@ -2,6 +2,7 @@ import datetime
 import itertools
 import json
 import logging
+import math
 import os
 from urllib.parse import quote, quote_plus
 
@@ -228,6 +229,17 @@ def _require_folder(folder_id, owner_sub):
     if not folder or folder.owner_sub != owner_sub:
         raise Http404
     return folder
+
+
+def _parse_captured_at(cap_str):
+    """EXIF/filename capture date from the browser — bad values are not fatal."""
+    if not cap_str:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(cap_str.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=datetime.timezone.utc) if dt.tzinfo is None else dt
+    except (ValueError, AttributeError):
+        return None
 
 
 def _require_file(file_id, owner_sub):
@@ -463,13 +475,17 @@ def upload_url(request):
             Fields={"Content-Type": content_type},
             Conditions=[
                 {"Content-Type": content_type},
-                ["content-length-range", 1, settings.MAX_UPLOAD_BYTES],
+                # This path only carries sub-threshold files now; anything
+                # larger goes through multipart.
+                ["content-length-range", 1, settings.MULTIPART_THRESHOLD],
             ],
-            ExpiresIn=300,
+            # The policy is checked when the upload lands, so this has to
+            # outlast the transfer, not just the click that started it.
+            ExpiresIn=3600,
         )
         return JsonResponse({"url": presigned["url"], "fields": presigned["fields"],
                              "s3_key": s3_key, "exists": exists,
-                             "max_bytes": settings.MAX_UPLOAD_BYTES})
+                             "max_bytes": settings.MULTIPART_THRESHOLD})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -488,15 +504,7 @@ def confirm_upload(request):
             folder_id = folder.folder_id
 
         head = _s3().head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=data["s3_key"])
-
-        captured_at = None
-        if cap_str := data.get("captured_at"):
-            try:
-                captured_at = datetime.datetime.fromisoformat(cap_str.replace("Z", "+00:00"))
-                if captured_at.tzinfo is None:
-                    captured_at = captured_at.replace(tzinfo=datetime.timezone.utc)
-            except (ValueError, AttributeError):
-                pass
+        captured_at = _parse_captured_at(data.get("captured_at"))
 
         drive_file, created = dal.upsert_file(
             s3_key=data["s3_key"],
@@ -523,6 +531,181 @@ def confirm_upload(request):
                              "storage_used": storage_used, "overwritten": not created})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
+
+
+# ---------------------------------------------------------------------------
+# Multipart upload — the path for anything above MULTIPART_THRESHOLD
+# ---------------------------------------------------------------------------
+
+def _owned_key(s3_key, owner_sub):
+    """The browser supplies the key on every multipart call, so verify it sits
+    inside the caller's own prefix before signing anything against it."""
+    if not owner_sub or not s3_key or not s3_key.startswith(f"{owner_sub}/"):
+        raise Http404
+    return s3_key
+
+
+def _part_size_for(size):
+    """Part size that keeps the object under S3's hard 10,000-part ceiling."""
+    part = settings.MULTIPART_PART_SIZE
+    if size > part * 9000:  # headroom under 10k
+        mib = 1024 ** 2
+        part = math.ceil(size / 9000 / mib) * mib
+    return part
+
+
+@cognito_login_required
+@require_POST
+def multipart_create(request):
+    try:
+        data = json.loads(request.body)
+        owner_sub = _get_owner_sub(request)
+        size = int(data.get("size", 0) or 0)
+
+        if size > settings.MAX_UPLOAD_BYTES:
+            return JsonResponse({"error": "File exceeds the upload limit."}, status=400)
+
+        filename     = data.get("filename", "unnamed")
+        content_type = data.get("content_type", "application/octet-stream")
+        folder_path  = _get_folder_path(data.get("folder_pk"), owner_sub)
+        s3_key = f"{owner_sub}/{folder_path}/{filename}" if folder_path else f"{owner_sub}/{filename}"
+
+        existing = dal.get_file_by_s3key(s3_key)
+
+        resp = _s3().create_multipart_upload(
+            Bucket=settings.DRIVE_BUCKET_NAME,
+            Key=s3_key,
+            ContentType=content_type,
+            # Set the storage class here rather than copying afterwards:
+            # CopyObject caps at 5 GB and would fail on exactly the files
+            # this path exists to carry.
+            StorageClass=DriveFile.GLACIER_IR,
+        )
+        part_size = _part_size_for(size)
+        return JsonResponse({
+            "upload_id":  resp["UploadId"],
+            "s3_key":     s3_key,
+            "part_size":  part_size,
+            "part_count": max(1, math.ceil(size / part_size)) if size else 1,
+            "exists":     existing is not None and not existing.deleted_at,
+        })
+    except Exception as e:
+        logger.error("multipart create failed: %s", e)
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@cognito_login_required
+@require_POST
+def multipart_urls(request):
+    """Presign a batch of part URLs. Batched rather than all-at-once so a long
+    upload isn't holding a thousand URLs that age out together."""
+    try:
+        data = json.loads(request.body)
+        owner_sub = _get_owner_sub(request)
+        s3_key    = _owned_key(data.get("s3_key"), owner_sub)
+        upload_id = data.get("upload_id", "")
+        numbers   = [int(n) for n in data.get("part_numbers", [])][:200]
+
+        s3 = _s3()
+        urls = {
+            str(n): s3.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket":     settings.DRIVE_BUCKET_NAME,
+                    "Key":        s3_key,
+                    "UploadId":   upload_id,
+                    "PartNumber": n,
+                },
+                ExpiresIn=settings.MULTIPART_URL_EXPIRY,
+            )
+            for n in numbers if 1 <= n <= 10000
+        }
+        return JsonResponse({"urls": urls})
+    except Http404:
+        raise
+    except Exception as e:
+        logger.error("multipart urls failed: %s", e)
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@cognito_login_required
+@require_POST
+def multipart_complete(request):
+    try:
+        data = json.loads(request.body)
+        owner_sub = _get_owner_sub(request)
+        s3_key    = _owned_key(data.get("s3_key"), owner_sub)
+
+        parts = sorted(
+            [{"PartNumber": int(p["PartNumber"]), "ETag": p["ETag"]}
+             for p in data.get("parts", [])],
+            key=lambda p: p["PartNumber"],
+        )
+        if not parts:
+            return JsonResponse({"error": "No uploaded parts to assemble."}, status=400)
+
+        folder_id = None
+        if folder_pk := data.get("folder_pk"):
+            folder = _require_folder(folder_pk, owner_sub)
+            folder_id = folder.folder_id
+
+        s3 = _s3()
+        s3.complete_multipart_upload(
+            Bucket=settings.DRIVE_BUCKET_NAME,
+            Key=s3_key,
+            UploadId=data.get("upload_id", ""),
+            MultipartUpload={"Parts": parts},
+        )
+
+        head = s3.head_object(Bucket=settings.DRIVE_BUCKET_NAME, Key=s3_key)
+        drive_file, created = dal.upsert_file(
+            s3_key=s3_key,
+            owner_sub=owner_sub,
+            name=data["filename"],
+            size=head["ContentLength"],
+            content_type=head.get("ContentType", "application/octet-stream"),
+            folder_id=folder_id,
+            storage_class=DriveFile.GLACIER_IR,
+            captured_at=_parse_captured_at(data.get("captured_at")),
+        )
+        # No copy_object — the storage class was set on create_multipart_upload.
+
+        html = render(request, "drive/partials/file_row.html", {"file": drive_file}).content.decode()
+        _, storage_used, _ = _storage_stats(owner_sub)
+        return JsonResponse({"html": html, "id": drive_file.file_id,
+                             "storage_used": storage_used, "overwritten": not created})
+    except Http404:
+        raise
+    except Exception as e:
+        logger.error("multipart complete failed: %s", e)
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@cognito_login_required
+@require_POST
+def multipart_abort(request):
+    """Discard a half-finished upload so its parts stop costing storage.
+    Best-effort — the bucket's abort-incomplete-multipart lifecycle rule
+    sweeps anything that slips through after 7 days."""
+    owner_sub = _get_owner_sub(request)
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    # Validated outside the try below, so a key that isn't the caller's 404s
+    # instead of being reported as a successful abort.
+    s3_key = _owned_key(data.get("s3_key"), owner_sub)
+
+    try:
+        _s3().abort_multipart_upload(
+            Bucket=settings.DRIVE_BUCKET_NAME,
+            Key=s3_key,
+            UploadId=data.get("upload_id", ""),
+        )
+    except Exception as e:
+        logger.warning("multipart abort failed for %s: %s", s3_key, e)
+    return JsonResponse({"aborted": True})
 
 
 # ---------------------------------------------------------------------------

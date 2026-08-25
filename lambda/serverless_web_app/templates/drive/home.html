@@ -34,6 +34,8 @@ document.addEventListener('alpine:init', () => {
         failedDeleting: false,
         failedCount: {{ failed_count|default:0 }},
         _retryPending: null,
+        maxUploadBytes: {{ MAX_UPLOAD_BYTES|default:0 }},
+        multipartThreshold: {{ MULTIPART_THRESHOLD|default:0 }},
         storageUsed: '{{ storage_used|default:"" }}',
         sidebarOpen: window.innerWidth >= 768,
         _confirmQueue: Promise.resolve(),
@@ -499,8 +501,23 @@ document.addEventListener('alpine:init', () => {
         // Returns 'ok' | 'failed' | 'skipped' — never throws. Anything that
         // returns 'failed' has also been written to the failed-upload history.
         async _uploadOne(file, folderPk, toastId, injectRow = true) {
-            let stage = 'presign';
+            let stage = 'precheck';
             try {
+                // Checked before any round trip — the browser already knows the
+                // size, and S3 would only reject it after the whole transfer.
+                if (this.maxUploadBytes && file.size > this.maxUploadBytes) {
+                    throw new Error(
+                        `File is ${this._fmtBytes(file.size)} — the upload limit is ` +
+                        `${this._fmtBytes(this.maxUploadBytes)}. Nothing was uploaded.`
+                    );
+                }
+                // Big files go out in parts so a dropped connection costs one
+                // part instead of the entire upload.
+                if (file.size >= this.multipartThreshold) {
+                    return await this._uploadMultipart(file, folderPk, toastId, injectRow);
+                }
+
+                stage = 'presign';
                 const resp = await fetch('{% url "drive_upload_url" %}', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'X-CSRFToken': this.csrf() },
@@ -510,13 +527,13 @@ document.addEventListener('alpine:init', () => {
                 const { url, fields, s3_key, error, exists, max_bytes } = await resp.json();
                 if (error) throw new Error(error);
 
-                // Fail fast — S3 would reject this anyway, but only after the
-                // whole file has gone over the wire.
-                stage = 'precheck';
+                // Backstop: catches a stale page whose cached threshold is
+                // lower than what the server now enforces.
                 if (max_bytes && file.size > max_bytes) {
+                    stage = 'precheck';
                     throw new Error(
-                        `File is ${this._fmtBytes(file.size)} — the upload limit is ` +
-                        `${this._fmtBytes(max_bytes)}. Nothing was uploaded.`
+                        `File is ${this._fmtBytes(file.size)} — the single-request limit is ` +
+                        `${this._fmtBytes(max_bytes)}. Reload the page and try again.`
                     );
                 }
 
@@ -580,6 +597,166 @@ document.addEventListener('alpine:init', () => {
                 this._completeUploadToast(toastId);
                 return 'ok';
             } catch (err) {
+                this._failUploadToast(toastId, file.name);
+                await this._recordFailure(file, folderPk, stage, err);
+                return 'failed';
+            }
+        },
+
+        /* ── multipart upload (files >= multipartThreshold) ── */
+
+        // Upload one part, retrying on its own so a blip costs ~1 part rather
+        // than the whole file. onLoaded reports absolute bytes for this part,
+        // so a retry naturally rewinds its share of the progress bar.
+        _putPart(url, blob, onLoaded, attempt = 1) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('PUT', url);
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) onLoaded(e.loaded);
+                });
+                xhr.addEventListener('load', () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        const etag = xhr.getResponseHeader('ETag');
+                        if (!etag) {
+                            reject(new Error('S3 returned no ETag for this part — the bucket CORS rule must expose ETag.'));
+                            return;
+                        }
+                        onLoaded(blob.size);
+                        resolve(etag);
+                    } else {
+                        reject(new Error(this._s3Error(xhr)));
+                    }
+                });
+                xhr.addEventListener('error', () => reject(new Error('Network error while uploading a part.')));
+                xhr.send(blob);
+            }).catch(async (err) => {
+                if (attempt >= 3) throw err;
+                onLoaded(0);  // this part starts over — drop its progress
+                await new Promise(r => setTimeout(r, 1000 * attempt));
+                return this._putPart(url, blob, onLoaded, attempt + 1);
+            });
+        },
+
+        async _abortMultipart(info) {
+            try {
+                await fetch('{% url "drive_multipart_abort" %}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': this.csrf() },
+                    body: JSON.stringify({ s3_key: info.s3_key, upload_id: info.upload_id }),
+                });
+            } catch (e) {
+                // Bucket lifecycle sweeps orphaned parts after 7 days anyway
+                console.error('Could not abort multipart upload:', e);
+            }
+        },
+
+        async _uploadMultipart(file, folderPk, toastId, injectRow) {
+            let stage = 'presign';
+            let info  = null;
+            try {
+                const createResp = await fetch('{% url "drive_multipart_create" %}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': this.csrf() },
+                    body: JSON.stringify({
+                        filename:     file.name,
+                        content_type: file.type || 'application/octet-stream',
+                        size:         file.size,
+                        folder_pk:    folderPk,
+                    }),
+                });
+                info = await createResp.json();
+                if (info.error) throw new Error(info.error);
+                if (!createResp.ok) throw new Error(`Could not start upload (HTTP ${createResp.status})`);
+
+                if (info.exists) {
+                    const ok = await (this._confirmQueue = this._confirmQueue.then(() =>
+                        this.showConfirm(
+                            'File Already Exists',
+                            `"${file.name}" already exists in this location. Replace it?`,
+                            'Replace',
+                            true
+                        )
+                    ));
+                    if (!ok) {
+                        await this._abortMultipart(info);
+                        this.dismissToast(toastId);
+                        return 'skipped';
+                    }
+                }
+
+                stage = 'upload';
+                const partSize  = info.part_size;
+                const partCount = Math.max(1, Math.ceil(file.size / partSize));
+                const parts     = new Array(partCount);
+                const loaded    = new Array(partCount).fill(0);
+
+                const bumpProgress = () => {
+                    const done = loaded.reduce((a, b) => a + b, 0);
+                    // Cap at 90 — the last 10% belongs to assembling and saving
+                    this._updateUploadToast(toastId, Math.min(90, Math.round(done / file.size * 90)));
+                };
+
+                const BATCH = 100;
+                for (let start = 0; start < partCount; start += BATCH) {
+                    const numbers = [];
+                    for (let n = start + 1; n <= Math.min(start + BATCH, partCount); n++) numbers.push(n);
+
+                    const urlResp = await fetch('{% url "drive_multipart_urls" %}', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': this.csrf() },
+                        body: JSON.stringify({
+                            s3_key: info.s3_key, upload_id: info.upload_id, part_numbers: numbers,
+                        }),
+                    });
+                    const { urls, error } = await urlResp.json();
+                    if (error) throw new Error(error);
+
+                    const tasks = numbers.map(n => async () => {
+                        const from = (n - 1) * partSize;
+                        const blob = file.slice(from, Math.min(from + partSize, file.size));
+                        const etag = await this._putPart(urls[String(n)], blob, (bytes) => {
+                            loaded[n - 1] = bytes;
+                            bumpProgress();
+                        });
+                        parts[n - 1] = { PartNumber: n, ETag: etag };
+                    });
+                    await this._runConcurrent(tasks, 4);
+                }
+
+                stage = 'confirm';
+                this._updateUploadToast(toastId, 95);
+                const captured_at = await this._extractCaptureDate(file);
+                const doneResp = await fetch('{% url "drive_multipart_complete" %}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': this.csrf() },
+                    body: JSON.stringify({
+                        s3_key:    info.s3_key,
+                        upload_id: info.upload_id,
+                        parts,
+                        filename:  file.name,
+                        folder_pk: folderPk,
+                        captured_at,
+                    }),
+                });
+                const result = await doneResp.json();
+                if (result.error) throw new Error(result.error);
+                if (!doneResp.ok) throw new Error(`Could not save file record (HTTP ${doneResp.status})`);
+
+                if (result.html && injectRow) {
+                    if (result.overwritten) {
+                        const existing = document.getElementById('file-' + result.id);
+                        if (existing) existing.outerHTML = result.html;
+                    } else {
+                        const list = document.getElementById('file-list');
+                        if (list) { list.insertAdjacentHTML('afterbegin', result.html); document.getElementById('empty-state')?.remove(); }
+                    }
+                }
+                if (result.storage_used) this.storageUsed = result.storage_used;
+                this._completeUploadToast(toastId);
+                return 'ok';
+            } catch (err) {
+                if (info && info.upload_id) await this._abortMultipart(info);
                 this._failUploadToast(toastId, file.name);
                 await this._recordFailure(file, folderPk, stage, err);
                 return 'failed';

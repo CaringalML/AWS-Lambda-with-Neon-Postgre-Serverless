@@ -57,6 +57,12 @@ resource "aws_iam_role_policy" "lambda_s3_drive" {
           "s3:HeadObject",
           "s3:ListBucket",
           "s3:RestoreObject",
+          # Multipart uploads for large files. PutObject already covers
+          # CreateMultipartUpload/UploadPart/CompleteMultipartUpload; these
+          # cover cancelling and inspecting an upload in progress.
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+          "s3:ListBucketMultipartUploads",
         ]
         Resource = [
           aws_s3_bucket.drive.arn,
