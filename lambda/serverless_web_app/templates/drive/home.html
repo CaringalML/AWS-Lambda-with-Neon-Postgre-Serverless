@@ -43,6 +43,91 @@ document.addEventListener('alpine:init', () => {
         preview: null,
         ctx: { show: false, x: 0, y: 0, pk: null, archived: false, restoreStatus: '', name: '', isFolder: false, folderUrl: '' },
 
+        /* ── batch completion chime ── */
+        // Only for batches worth walking away from
+        SOUND_MIN_FILES: 10,
+        soundEnabled: localStorage.getItem('nd_upload_sound') !== 'off',
+        _audioCtx: null,
+
+        toggleSound() {
+            this.soundEnabled = !this.soundEnabled;
+            localStorage.setItem('nd_upload_sound', this.soundEnabled ? 'on' : 'off');
+            if (this.soundEnabled) this._chime(true);   // preview what you turned on
+        },
+
+        // Built during the click/change gesture that starts an upload —
+        // browsers leave an AudioContext created outside a gesture suspended,
+        // and by the time a 40-minute upload ends there's no gesture left.
+        _primeAudio() {
+            if (!this.soundEnabled || this._audioCtx) return;
+            try {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                if (Ctx) this._audioCtx = new Ctx();
+            } catch (e) {
+                // No audio device or blocked — silence is an acceptable outcome
+            }
+        },
+
+        // Synthesised rather than shipped as an audio file: no binary asset to
+        // deploy, no CloudFront request, works offline.
+        _chime(success = true) {
+            if (!this.soundEnabled) return;
+            this._primeAudio();
+            const ctx = this._audioCtx;
+            if (!ctx) return;
+
+            const play = () => {
+                // Rising major triad when everything landed; a lower falling
+                // pair when something didn't, so the two never get confused.
+                const notes = success ? [523.25, 659.25, 783.99] : [415.30, 349.23];
+                notes.forEach((freq, i) => {
+                    const t0   = ctx.currentTime + i * 0.13;
+                    const osc  = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+                    gain.gain.setValueAtTime(0.0001, t0);
+                    gain.gain.linearRampToValueAtTime(0.18, t0 + 0.02);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.42);
+                    osc.connect(gain).connect(ctx.destination);
+                    osc.start(t0);
+                    osc.stop(t0 + 0.45);
+                });
+            };
+
+            try {
+                if (ctx.state === 'suspended') ctx.resume().then(play).catch(() => {});
+                else play();
+            } catch (e) {
+                console.error('Could not play completion chime:', e);
+            }
+        },
+
+        // Say how a big batch went — the point is to be understood from the
+        // next room, so the sound and the toast agree.
+        _announceBatch(total, results) {
+            if (total <= this.SOUND_MIN_FILES) return;
+            const list    = results || [];
+            const failed  = list.filter(r => r === 'failed').length;
+            const done    = list.filter(r => r === 'ok').length;
+            const skipped = list.filter(r => r === 'skipped').length;
+            this._chime(failed === 0);
+            if (failed) {
+                this.showToast(
+                    `Uploaded ${done} of ${total} — ${failed} failed. Check Failed Uploads.`,
+                    'error', 12000
+                );
+            } else if (skipped) {
+                // Declined overwrites aren't failures, but "all uploaded"
+                // would be a lie when some were left alone.
+                this.showToast(
+                    `Uploaded ${done} of ${total} — ${skipped} skipped.`, 'success', 8000
+                );
+            } else {
+                this.showToast(`All ${done} files uploaded.`, 'success', 8000);
+            }
+        },
+
         /* ── toast stack ── */
         toasts: [],
         _toastSeq: 0,
@@ -835,13 +920,16 @@ document.addEventListener('alpine:init', () => {
 
         async uploadFiles(files) {
             this.uploading = true;
+            // Still inside the file-picker gesture here — see _primeAudio
+            if (files.length > this.SOUND_MIN_FILES) this._primeAudio();
             const folderPk = {% if current_folder %}'{{ current_folder.pk }}'{% else %}null{% endif %};
             const tasks = files.map(file => () => {
                 const toastId = this._addUploadToast(file.name);
                 return this._uploadOne(file, folderPk, toastId);
             });
-            await this._runConcurrent(tasks, 5);
+            const results = await this._runConcurrent(tasks, 5);
             this.uploading = false;
+            this._announceBatch(files.length, results);
         },
 
         async uploadFolder(event) {
@@ -850,6 +938,7 @@ document.addEventListener('alpine:init', () => {
             if (!files.length) return;
 
             this.uploading = true;
+            if (files.length > this.SOUND_MIN_FILES) this._primeAudio();
             this.showToast('Creating folders…', 'info', 3000);
 
             // folderPkMap: relative path string → db pk
@@ -902,7 +991,8 @@ document.addEventListener('alpine:init', () => {
                     const toastId        = this._addUploadToast(`${file.name} (${idx + 1}/${files.length})`);
                     return this._uploadOne(file, folderPk, toastId, false);
                 });
-                await this._runConcurrent(fileTasks, 5);
+                const results = await this._runConcurrent(fileTasks, 5);
+                this._announceBatch(files.length, results);
 
             } catch (err) {
                 alert(err.message);
@@ -1359,6 +1449,24 @@ document.addEventListener('alpine:init', () => {
                  x-transition:enter-start="opacity-0 scale-95 translate-y-1"
                  x-transition:enter-end="opacity-100 scale-100 translate-y-0"
                  class="mt-1 bg-[#0d0f14] border border-zinc-800 rounded-xl shadow-2xl shadow-black/60 overflow-hidden">
+                {# Chime after big batches — click to toggle and hear it #}
+                <button @click="toggleSound()"
+                        class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-white/5 hover:text-zinc-100 transition-colors duration-100"
+                        :title="`Play a sound when a batch of more than ${SOUND_MIN_FILES} files finishes uploading`">
+                    <svg x-show="soundEnabled" class="w-4 h-4 text-zinc-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.536 8.464a5 5 0 010 7.072M17.95 6.05a8 8 0 010 11.9M11 5L6 9H2v6h4l5 4V5z"/>
+                    </svg>
+                    <svg x-show="!soundEnabled" x-cloak class="w-4 h-4 text-zinc-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM17 9l4 6m0-6l-4 6"/>
+                    </svg>
+                    <span class="flex-1 text-left">Upload chime</span>
+                    <span class="text-[10px] font-medium px-1.5 py-0.5 rounded-md"
+                          :class="soundEnabled ? 'bg-sky-500/20 text-sky-300' : 'bg-zinc-700/60 text-zinc-500'"
+                          x-text="soundEnabled ? 'On' : 'Off'"></span>
+                </button>
+
+                <div class="border-t border-zinc-800"></div>
+
                 <a href="{% url 'dashboard' %}"
                    class="flex items-center gap-3 px-4 py-2.5 text-sm text-zinc-300 hover:bg-white/5 hover:text-zinc-100 transition-colors duration-100">
                     <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
