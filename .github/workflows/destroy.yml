@@ -16,6 +16,10 @@ on:
         description: 'Type "destroy-novadrive" exactly to proceed'
         required: true
         default: ''
+      unlock_id:
+        description: 'Optional: stale lock ID to release first (from a cancelled run)'
+        required: false
+        default: ''
       backed_up:
         description: 'Files are backed up? Deleting them cannot be undone'
         type: choice
@@ -119,6 +123,14 @@ jobs:
 
       - name: Terraform Init
         run: terraform init -input=false
+
+      # A cancelled run leaves its DynamoDB lock behind — terraform has no
+      # chance to release it — and every later run then fails to acquire.
+      - name: Release stale state lock
+        if: github.event.inputs.unlock_id != ''
+        env:
+          UNLOCK_ID: ${{ github.event.inputs.unlock_id }}
+        run: terraform force-unlock -force "$UNLOCK_ID"
 
       - name: Terraform Plan (destroy)
         env:
