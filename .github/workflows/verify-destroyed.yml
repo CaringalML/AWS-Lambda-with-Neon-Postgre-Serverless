@@ -35,12 +35,24 @@ jobs:
 
       - name: Terraform state must be empty
         run: |
-          terraform init -input=false > /dev/null
-          COUNT=$(terraform state list 2>/dev/null | wc -l)
+          # Once the state bucket itself is deleted, init can no longer reach a
+          # backend. That is the end state we want, not an audit failure — the
+          # AWS sweep below is what actually proves the resources are gone.
+          if terraform init -input=false > /tmp/init.log 2>&1; then
+            COUNT=$(terraform state list 2>/dev/null | wc -l)
+            NOTE="resources still tracked: **$COUNT**"
+          elif grep -qiE "does not exist|NoSuchBucket" /tmp/init.log; then
+            COUNT=0
+            NOTE="state backend bucket no longer exists — nothing left to track"
+          else
+            COUNT=-1
+            NOTE="terraform init failed for an unexpected reason"
+            tail -5 /tmp/init.log
+          fi
           {
             echo "## Terraform state"
             echo ""
-            echo "resources still tracked: **$COUNT**"
+            echo "$NOTE"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$COUNT" != "0" ]; then
             {
