@@ -29,6 +29,7 @@ jobs:
   destroy:
     name: Destroying ${{ github.ref_name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     # Add a required reviewer to this environment in repo Settings to gate the
     # run behind an approval as well as the typed confirmation.
@@ -120,7 +121,13 @@ jobs:
         run: terraform init -input=false
 
       - name: Terraform Plan (destroy)
-        run: terraform plan -destroy -no-color -out=tfdestroy
+        env:
+          TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
+          TF_VAR_cognito_admin_email: ${{ secrets.ADMIN_EMAIL }}
+          TF_VAR_cognito_admin_password: ${{ secrets.ADMIN_PASSWORD }}
+        # -input=false turns a missing variable into an immediate failure
+        # instead of a prompt that hangs the job until the timeout.
+        run: terraform plan -destroy -input=false -no-color -out=tfdestroy
 
       # aws_s3_bucket.drive has no force_destroy, so terraform fails with
       # BucketNotEmpty while any object or in-flight upload remains.
@@ -140,7 +147,11 @@ jobs:
           echo "bucket emptied"
 
       - name: Terraform Destroy
-        run: terraform apply -auto-approve tfdestroy
+        env:
+          TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
+          TF_VAR_cognito_admin_email: ${{ secrets.ADMIN_EMAIL }}
+          TF_VAR_cognito_admin_password: ${{ secrets.ADMIN_PASSWORD }}
+        run: terraform apply -input=false -auto-approve tfdestroy
 
       - name: Remaining resources
         if: always()
