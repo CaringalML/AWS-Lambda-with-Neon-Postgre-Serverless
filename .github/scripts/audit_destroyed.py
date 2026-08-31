@@ -112,35 +112,71 @@ for label, count, detail in rows:
     flag = "" if count == "0" else " **"
     out.append(f"| {label} | {count}{flag} | {detail[:90]} |")
 
+# Batch keeps deregistered job definitions visible as INACTIVE revisions.
+# They are metadata and cost nothing, so separate them from live resources.
+out += ["", "## Batch job definitions by status", ""]
+for status in ("ACTIVE", "INACTIVE"):
+    try:
+        defs = [d["jobDefinitionArn"] for d in client("batch").describe_job_definitions(
+            status=status)["jobDefinitions"]
+            if d["jobDefinitionName"].startswith(PREFIX)]
+        out.append(f"- {status}: {len(defs)}" + (f" — {defs[0].split('/')[-1]}" if defs else ""))
+    except Exception as exc:
+        out.append(f"- {status}: error {type(exc).__name__}")
+
 # The stack could have been applied elsewhere at some point in its life.
+# List the ARNs, not just a count — "17 tagged" means nothing on its own.
 out += ["", "## Other regions", "", "| region | tagged | lambdas |", "|---|---|---|"]
+elsewhere = {}
 for region in ("ap-southeast-2", "ap-southeast-1", "us-west-2", "eu-west-1"):
     try:
-        tagged = sum(
-            len(p["ResourceTagMappingList"])
-            for p in pages("resourcegroupstaggingapi", "get_resources", region,
-                           TagFilters=[{"Key": "Environment", "Values": ["dev"]}]))
+        arns = [r["ResourceARN"]
+                for p in pages("resourcegroupstaggingapi", "get_resources", region,
+                               TagFilters=[{"Key": "Environment", "Values": ["dev"]}])
+                for r in p["ResourceTagMappingList"]]
         lambdas = len([f for p in pages("lambda", "list_functions", region)
                        for f in p["Functions"]
                        if f["FunctionName"].startswith(PREFIX)])
-        out.append(f"| {region} | {tagged} | {lambdas} |")
+        if arns:
+            elsewhere[region] = arns
+        out.append(f"| {region} | {len(arns)} | {lambdas} |")
         found += lambdas
     except Exception as exc:
         out.append(f"| {region} | error: {type(exc).__name__} | - |")
 
-out += ["", "## Left standing on purpose (never Terraform-managed)", ""]
+for region, arns in elsewhere.items():
+    out += ["", f"### Every Environment=dev ARN in {region}", "", "```"]
+    out += arns[:40]
+    if len(arns) > 40:
+        out.append(f"... and {len(arns) - 40} more")
+    out.append("```")
+
+out += ["", "## Terraform state backends", ""]
+# Every bucket in the account — if the state buckets are gone, terraform can
+# no longer destroy anything and leftovers must be removed by direct API call.
 try:
-    client("s3").head_bucket(Bucket="nova-drive-terraform-state")
-    objects = sum(p.get("KeyCount", 0) for p in
-                  pages("s3", "list_objects_v2", Bucket="nova-drive-terraform-state"))
-    out.append(f"- state bucket `nova-drive-terraform-state` — exists, {objects} object(s)")
-except Exception:
-    out.append("- state bucket `nova-drive-terraform-state` — gone")
-try:
-    client("dynamodb").describe_table(TableName="novadrive-terraform-lock")
-    out.append("- lock table `novadrive-terraform-lock` — exists")
-except Exception:
-    out.append("- lock table `novadrive-terraform-lock` — gone")
+    buckets = [b["Name"] for b in client("s3").list_buckets()["Buckets"]]
+    out.append(f"- buckets in account: {len(buckets)}"
+               + (f" — {', '.join(buckets)}" if buckets else " (none)"))
+except Exception as exc:
+    out.append(f"- buckets in account: error {type(exc).__name__}")
+
+for bucket in ("nova-drive-terraform-state", "maangasserverless"):
+    try:
+        client("s3").head_bucket(Bucket=bucket)
+        objects = sum(p.get("KeyCount", 0)
+                      for p in pages("s3", "list_objects_v2", Bucket=bucket))
+        out.append(f"- state bucket `{bucket}` — exists, {objects} object(s)")
+    except Exception:
+        out.append(f"- state bucket `{bucket}` — gone")
+
+for table, region in (("novadrive-terraform-lock", REGION),
+                      ("terraform-state-lock", "ap-southeast-2")):
+    try:
+        client("dynamodb", region).describe_table(TableName=table)
+        out.append(f"- lock table `{table}` ({region}) — exists")
+    except Exception:
+        out.append(f"- lock table `{table}` ({region}) — gone")
 
 errors = [r for r in rows if r[1] == "ERROR"]
 out += ["", f"### Sweep total: {found} stack resource(s), {len(errors)} probe error(s)"]
