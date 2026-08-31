@@ -63,6 +63,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # The default branch (novadrive) points at a DIFFERENT state backend and
+      # a different bucket in ap-southeast-2. Running this workflow from the
+      # wrong branch would target the wrong stack entirely, so refuse.
+      - name: Verify this is the v3 stack
+        run: |
+          if ! grep -q "nova-drive-terraform-state" versions.tf; then
+            echo "::error::This branch does not use the v3 state backend."
+            echo "::error::Re-run and pick the v3-novadrive branch in the Run workflow dialog."
+            grep -A5 'backend "s3"' versions.tf || true
+            exit 1
+          fi
+          grep -q "${DRIVE_BUCKET}" s3_drive.tf || {
+            echo "::error::s3_drive.tf does not reference ${DRIVE_BUCKET}."; exit 1; }
+          echo "confirmed: v3 state backend, bucket ${DRIVE_BUCKET}"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
