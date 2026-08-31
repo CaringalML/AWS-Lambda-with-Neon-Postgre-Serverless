@@ -1,0 +1,162 @@
+name: Destroy Infrastructure
+
+# Manual only. There is deliberately no `push` trigger — this workflow deletes
+# the entire stack and every uploaded file, and none of it is recoverable.
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.6.6
+  PYTHON_VERSION: "3.12"
+  DRIVE_BUCKET: nova-drive-caringal
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy-novadrive" exactly to proceed'
+        required: true
+        default: ''
+      backed_up:
+        description: 'Files are backed up? Deleting them cannot be undone'
+        type: choice
+        required: true
+        options:
+          - "no"
+          - "yes, delete everything"
+        default: "no"
+
+jobs:
+  destroy:
+    name: Destroying ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+
+    # Add a required reviewer to this environment in repo Settings to gate the
+    # run behind an approval as well as the typed confirmation.
+    environment: destroy
+
+    permissions:
+      contents: read
+
+    steps:
+      # Both guards run before AWS credentials are configured, so a mistyped
+      # dispatch cannot touch the account at all.
+      - name: Check confirmation phrase
+        env:
+          # Via env, not inline ${{ }} — interpolating dispatch input straight
+          # into a shell script is a command-injection footgun.
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "destroy-novadrive" ]; then
+            echo "::error::Confirmation phrase did not match. Nothing was destroyed."
+            exit 1
+          fi
+
+      - name: Check backup acknowledgement
+        env:
+          BACKED_UP: ${{ github.event.inputs.backed_up }}
+        run: |
+          if [ "$BACKED_UP" != "yes, delete everything" ]; then
+            echo "::error::Backup not acknowledged. Nothing was destroyed."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The default branch (novadrive) points at a DIFFERENT state backend and
+      # a different bucket in ap-southeast-2. Running this workflow from the
+      # wrong branch would target the wrong stack entirely, so refuse.
+      - name: Verify this is the v3 stack
+        run: |
+          if ! grep -q "nova-drive-terraform-state" versions.tf; then
+            echo "::error::This branch does not use the v3 state backend."
+            echo "::error::Re-run and pick the v3-novadrive branch in the Run workflow dialog."
+            grep -A5 'backend "s3"' versions.tf || true
+            exit 1
+          fi
+          grep -q "${DRIVE_BUCKET}" s3_drive.tf || {
+            echo "::error::s3_drive.tf does not reference ${DRIVE_BUCKET}."; exit 1; }
+          echo "confirmed: v3 state backend, bucket ${DRIVE_BUCKET}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Report what is about to be deleted
+        run: |
+          echo "account: $(aws sts get-caller-identity --query Account --output text)"
+          if aws s3api head-bucket --bucket "$DRIVE_BUCKET" 2>/dev/null; then
+            aws s3 ls "s3://$DRIVE_BUCKET" --recursive --summarize | tail -3
+            echo "Objects still in Deep Archive (these are NOT downloadable without a restore):"
+            aws s3api list-objects-v2 --bucket "$DRIVE_BUCKET" \
+              --query 'Contents[?StorageClass==`DEEP_ARCHIVE`].Key' --output text | tr '\t' '\n' | head -20
+          else
+            echo "bucket $DRIVE_BUCKET not found or already gone"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # terraform still evaluates data.archive_file during destroy, and it
+      # needs the Lambda source tree present to hash.
+      - name: Install Lambda dependencies
+        run: |
+          LAMBDA_DIR="lambda/serverless_web_app"
+          if [ -f "$LAMBDA_DIR/requirements.txt" ]; then
+            pip install -r "$LAMBDA_DIR/requirements.txt" -t "$LAMBDA_DIR/" --upgrade --no-cache-dir
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan (destroy)
+        run: terraform plan -destroy -no-color -out=tfdestroy
+
+      # aws_s3_bucket.drive has no force_destroy, so terraform fails with
+      # BucketNotEmpty while any object or in-flight upload remains.
+      - name: Empty the drive bucket
+        run: |
+          if ! aws s3api head-bucket --bucket "$DRIVE_BUCKET" 2>/dev/null; then
+            echo "bucket already gone — nothing to empty"
+            exit 0
+          fi
+          aws s3api list-multipart-uploads --bucket "$DRIVE_BUCKET" \
+            --query 'Uploads[].[Key,UploadId]' --output text 2>/dev/null \
+            | while read -r key uid; do
+                [ -n "$key" ] && aws s3api abort-multipart-upload \
+                  --bucket "$DRIVE_BUCKET" --key "$key" --upload-id "$uid" || true
+              done
+          aws s3 rm "s3://$DRIVE_BUCKET" --recursive
+          echo "bucket emptied"
+
+      - name: Terraform Destroy
+        run: terraform apply -auto-approve tfdestroy
+
+      - name: Remaining resources
+        if: always()
+        run: |
+          echo "### Destroy finished" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Not managed by Terraform — remove by hand if you want them gone:" >> $GITHUB_STEP_SUMMARY
+          echo "- state bucket \`nova-drive-terraform-state\` and lock table \`novadrive-terraform-lock\`" >> $GITHUB_STEP_SUMMARY
+          echo "- DNS records for the custom domain and the ACM validation CNAME" >> $GITHUB_STEP_SUMMARY
+          echo "- Docker Hub image \`rencecaringal000/novadrive-batch:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- this repo's AWS and Docker Hub secrets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Anything still tagged in this region:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          aws resourcegroupstaggingapi get-resources --region "$AWS_REGION" \
+            --tag-filters Key=Environment,Values=dev \
+            --query 'ResourceTagMappingList[].ResourceARN' --output text \
+            | tr '\t' '\n' >> $GITHUB_STEP_SUMMARY || echo "(none)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
