@@ -113,6 +113,25 @@ probe("Tagged Environment=dev", lambda: [
 probe("Tagged INACTIVE job defs (free)", lambda: [])  # placeholder, filled below
 rows[-1] = ("Tagged Batch job defs (INACTIVE metadata, free)", "0", "excluded above")
 
+# Identify every Cognito pool by name — a tagged pool that the name-prefix
+# probe misses could be this stack under an old name, or another project.
+cognito_detail = []
+try:
+    for u in client("cognito-idp").list_user_pools(MaxResults=60)["UserPools"]:
+        cognito_detail.append(f"{u['Id']}  name={u['Name']}")
+except Exception as exc:
+    cognito_detail.append(f"error {type(exc).__name__}")
+
+# Same for the raw tagged list in this region.
+tagged_detail = []
+try:
+    tagged_detail = [r["ResourceARN"]
+                     for p in pages("resourcegroupstaggingapi", "get_resources",
+                                    TagFilters=[{"Key": "Environment", "Values": ["dev"]}])
+                     for r in p["ResourceTagMappingList"]]
+except Exception as exc:
+    tagged_detail = [f"error {type(exc).__name__}"]
+
 out = ["## Live resource sweep (us-east-1)", "",
        "| resource | count | detail |", "|---|---|---|"]
 for label, count, detail in rows:
@@ -121,6 +140,14 @@ for label, count, detail in rows:
 
 # Batch keeps deregistered job definitions visible as INACTIVE revisions.
 # They are metadata and cost nothing, so separate them from live resources.
+out += ["", "## Cognito user pools in this account (all names)", "", "```"]
+out += cognito_detail or ["(none)"]
+out.append("```")
+
+out += ["", "## Every Environment=dev ARN in us-east-1", "", "```"]
+out += tagged_detail or ["(none)"]
+out.append("```")
+
 out += ["", "## Batch job definitions by status", ""]
 for status in ("ACTIVE", "INACTIVE"):
     try:
