@@ -112,21 +112,44 @@ for label, count, detail in rows:
     flag = "" if count == "0" else " **"
     out.append(f"| {label} | {count}{flag} | {detail[:90]} |")
 
+# Batch keeps deregistered job definitions visible as INACTIVE revisions.
+# They are metadata and cost nothing, so separate them from live resources.
+out += ["", "## Batch job definitions by status", ""]
+for status in ("ACTIVE", "INACTIVE"):
+    try:
+        defs = [d["jobDefinitionArn"] for d in client("batch").describe_job_definitions(
+            status=status)["jobDefinitions"]
+            if d["jobDefinitionName"].startswith(PREFIX)]
+        out.append(f"- {status}: {len(defs)}" + (f" — {defs[0].split('/')[-1]}" if defs else ""))
+    except Exception as exc:
+        out.append(f"- {status}: error {type(exc).__name__}")
+
 # The stack could have been applied elsewhere at some point in its life.
+# List the ARNs, not just a count — "17 tagged" means nothing on its own.
 out += ["", "## Other regions", "", "| region | tagged | lambdas |", "|---|---|---|"]
+elsewhere = {}
 for region in ("ap-southeast-2", "ap-southeast-1", "us-west-2", "eu-west-1"):
     try:
-        tagged = sum(
-            len(p["ResourceTagMappingList"])
-            for p in pages("resourcegroupstaggingapi", "get_resources", region,
-                           TagFilters=[{"Key": "Environment", "Values": ["dev"]}]))
+        arns = [r["ResourceARN"]
+                for p in pages("resourcegroupstaggingapi", "get_resources", region,
+                               TagFilters=[{"Key": "Environment", "Values": ["dev"]}])
+                for r in p["ResourceTagMappingList"]]
         lambdas = len([f for p in pages("lambda", "list_functions", region)
                        for f in p["Functions"]
                        if f["FunctionName"].startswith(PREFIX)])
-        out.append(f"| {region} | {tagged} | {lambdas} |")
+        if arns:
+            elsewhere[region] = arns
+        out.append(f"| {region} | {len(arns)} | {lambdas} |")
         found += lambdas
     except Exception as exc:
         out.append(f"| {region} | error: {type(exc).__name__} | - |")
+
+for region, arns in elsewhere.items():
+    out += ["", f"### Every Environment=dev ARN in {region}", "", "```"]
+    out += arns[:40]
+    if len(arns) > 40:
+        out.append(f"... and {len(arns) - 40} more")
+    out.append("```")
 
 out += ["", "## Left standing on purpose (never Terraform-managed)", ""]
 try:
