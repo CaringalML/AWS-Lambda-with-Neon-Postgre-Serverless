@@ -151,19 +151,32 @@ for region, arns in elsewhere.items():
         out.append(f"... and {len(arns) - 40} more")
     out.append("```")
 
-out += ["", "## Left standing on purpose (never Terraform-managed)", ""]
+out += ["", "## Terraform state backends", ""]
+# Every bucket in the account — if the state buckets are gone, terraform can
+# no longer destroy anything and leftovers must be removed by direct API call.
 try:
-    client("s3").head_bucket(Bucket="nova-drive-terraform-state")
-    objects = sum(p.get("KeyCount", 0) for p in
-                  pages("s3", "list_objects_v2", Bucket="nova-drive-terraform-state"))
-    out.append(f"- state bucket `nova-drive-terraform-state` — exists, {objects} object(s)")
-except Exception:
-    out.append("- state bucket `nova-drive-terraform-state` — gone")
-try:
-    client("dynamodb").describe_table(TableName="novadrive-terraform-lock")
-    out.append("- lock table `novadrive-terraform-lock` — exists")
-except Exception:
-    out.append("- lock table `novadrive-terraform-lock` — gone")
+    buckets = [b["Name"] for b in client("s3").list_buckets()["Buckets"]]
+    out.append(f"- buckets in account: {len(buckets)}"
+               + (f" — {', '.join(buckets)}" if buckets else " (none)"))
+except Exception as exc:
+    out.append(f"- buckets in account: error {type(exc).__name__}")
+
+for bucket in ("nova-drive-terraform-state", "maangasserverless"):
+    try:
+        client("s3").head_bucket(Bucket=bucket)
+        objects = sum(p.get("KeyCount", 0)
+                      for p in pages("s3", "list_objects_v2", Bucket=bucket))
+        out.append(f"- state bucket `{bucket}` — exists, {objects} object(s)")
+    except Exception:
+        out.append(f"- state bucket `{bucket}` — gone")
+
+for table, region in (("novadrive-terraform-lock", REGION),
+                      ("terraform-state-lock", "ap-southeast-2")):
+    try:
+        client("dynamodb", region).describe_table(TableName=table)
+        out.append(f"- lock table `{table}` ({region}) — exists")
+    except Exception:
+        out.append(f"- lock table `{table}` ({region}) — gone")
 
 errors = [r for r in rows if r[1] == "ERROR"]
 out += ["", f"### Sweep total: {found} stack resource(s), {len(errors)} probe error(s)"]
