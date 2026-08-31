@@ -56,9 +56,13 @@ probe("API Gateway v2 APIs", lambda: [
     a["ApiId"] for a in client("apigatewayv2").get_apis()["Items"]
     if a["Name"].startswith(PREFIX)])
 
+try:
+    LIVE_POOLS = client("cognito-idp").list_user_pools(MaxResults=60)["UserPools"]
+except Exception:
+    LIVE_POOLS = None  # unknown, so never treat a tagged pool as stale
+
 probe("Cognito user pools", lambda: [
-    u["Id"] for u in client("cognito-idp").list_user_pools(MaxResults=60)["UserPools"]
-    if u["Name"].startswith(PREFIX)])
+    u["Id"] for u in (LIVE_POOLS or []) if u["Name"].startswith(PREFIX)])
 
 probe("Batch job queues", lambda: [
     q["jobQueueName"] for q in client("batch").describe_job_queues()["jobQueues"]
@@ -100,6 +104,15 @@ probe("Security groups", lambda: [
     g["GroupId"] for g in client("ec2").describe_security_groups()["SecurityGroups"]
     if g["GroupName"].startswith(PREFIX)])
 
+def _stale_pool(arn):
+    """The tagging API is an eventually-consistent index and keeps listing a
+    deleted Cognito pool for hours. list_user_pools is authoritative: if the
+    pool is not in it, the ARN is a ghost entry, not a live resource."""
+    if ":userpool/" not in arn or LIVE_POOLS is None:
+        return False
+    return arn.rsplit("/", 1)[-1] not in {u["Id"] for u in LIVE_POOLS}
+
+
 # Deregistered Batch job definitions keep their ARN and tags but are INACTIVE
 # metadata — they cost nothing and AWS purges them. Counting them as live
 # resources makes a clean account look dirty, so report them separately.
@@ -108,7 +121,8 @@ probe("Tagged Environment=dev", lambda: [
         "resourcegroupstaggingapi", "get_resources",
         TagFilters=[{"Key": "Environment", "Values": ["dev"]}])
     for r in p["ResourceTagMappingList"]
-    if ":job-definition/" not in r["ResourceARN"]])
+    if ":job-definition/" not in r["ResourceARN"]
+    and not _stale_pool(r["ResourceARN"])])
 
 probe("Tagged INACTIVE job defs (free)", lambda: [])  # placeholder, filled below
 rows[-1] = ("Tagged Batch job defs (INACTIVE metadata, free)", "0", "excluded above")
