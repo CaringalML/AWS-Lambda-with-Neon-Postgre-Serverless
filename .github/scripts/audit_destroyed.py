@@ -100,11 +100,18 @@ probe("Security groups", lambda: [
     g["GroupId"] for g in client("ec2").describe_security_groups()["SecurityGroups"]
     if g["GroupName"].startswith(PREFIX)])
 
+# Deregistered Batch job definitions keep their ARN and tags but are INACTIVE
+# metadata — they cost nothing and AWS purges them. Counting them as live
+# resources makes a clean account look dirty, so report them separately.
 probe("Tagged Environment=dev", lambda: [
     r["ResourceARN"] for p in pages(
         "resourcegroupstaggingapi", "get_resources",
         TagFilters=[{"Key": "Environment", "Values": ["dev"]}])
-    for r in p["ResourceTagMappingList"]])
+    for r in p["ResourceTagMappingList"]
+    if ":job-definition/" not in r["ResourceARN"]])
+
+probe("Tagged INACTIVE job defs (free)", lambda: [])  # placeholder, filled below
+rows[-1] = ("Tagged Batch job defs (INACTIVE metadata, free)", "0", "excluded above")
 
 out = ["## Live resource sweep (us-east-1)", "",
        "| resource | count | detail |", "|---|---|---|"]
