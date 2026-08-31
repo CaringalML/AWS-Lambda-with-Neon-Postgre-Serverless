@@ -149,13 +149,45 @@ jobs:
             echo "bucket already gone — nothing to empty"
             exit 0
           fi
-          aws s3api list-multipart-uploads --bucket "$DRIVE_BUCKET" \
-            --query 'Uploads[].[Key,UploadId]' --output text 2>/dev/null \
-            | while read -r key uid; do
-                [ -n "$key" ] && aws s3api abort-multipart-upload \
-                  --bucket "$DRIVE_BUCKET" --key "$key" --upload-id "$uid" || true
+          echo "versioning: $(aws s3api get-bucket-versioning --bucket "$DRIVE_BUCKET"                               --query Status --output text)"
+
+          # In-flight multipart uploads also block bucket deletion
+          aws s3api list-multipart-uploads --bucket "$DRIVE_BUCKET"             --query 'Uploads[].[Key,UploadId]' --output text 2>/dev/null             | while read -r key uid; do
+                [ -n "$key" ] && aws s3api abort-multipart-upload                   --bucket "$DRIVE_BUCKET" --key "$key" --upload-id "$uid" || true
               done
-          aws s3 rm "s3://$DRIVE_BUCKET" --recursive
+
+          # `aws s3 rm --recursive` only removes CURRENT versions. On a
+          # versioned bucket the old versions and delete markers remain and
+          # DeleteBucket still fails with BucketNotEmpty, so purge every
+          # version explicitly.
+          pip install --quiet boto3
+          python3 - <<'PY'
+          import os, boto3
+          b = os.environ["DRIVE_BUCKET"]
+          s3 = boto3.client("s3")
+          batch, removed = [], 0
+
+          def flush():
+              global batch, removed
+              if batch:
+                  s3.delete_objects(Bucket=b, Delete={"Objects": batch, "Quiet": True})
+                  removed += len(batch)
+                  batch = []
+
+          for page in s3.get_paginator("list_object_versions").paginate(Bucket=b):
+              for kind in ("Versions", "DeleteMarkers"):
+                  for o in page.get(kind, []):
+                      batch.append({"Key": o["Key"], "VersionId": o["VersionId"]})
+                      if len(batch) == 1000:
+                          flush()
+          flush()
+          print(f"deleted {removed} object versions and delete markers")
+
+          left = s3.list_object_versions(Bucket=b)
+          rem = len(left.get("Versions", [])) + len(left.get("DeleteMarkers", []))
+          print(f"remaining: {rem}")
+          raise SystemExit(1 if rem else 0)
+          PY
           echo "bucket emptied"
 
       - name: Terraform Destroy
